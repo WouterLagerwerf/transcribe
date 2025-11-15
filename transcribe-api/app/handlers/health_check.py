@@ -1,0 +1,45 @@
+"""HTTP API server for health checks and transcription."""
+
+from aiohttp import web
+
+from app.config.settings import SERVER_HOST, HEALTH_CHECK_PORT, USE_VAD, USE_DIARIZATION
+from app.utils.logger import logger
+from app.services.transcription import is_server_ready, get_model_name
+from app.services.vad import is_vad_loaded
+from app.services.diarization import is_diarization_loaded
+from app.handlers.transcription_api import transcribe_handler
+
+
+async def health_check_handler(request):
+    """HTTP handler for health checks."""
+    if is_server_ready():
+        response_data = {
+            "status": "ok",
+            "model": get_model_name(),
+            "vad_enabled": USE_VAD,
+            "vad_loaded": is_vad_loaded() if USE_VAD else False,
+            "diarization_enabled": USE_DIARIZATION,
+            "diarization_loaded": is_diarization_loaded() if USE_DIARIZATION else False
+        }
+        return web.json_response(response_data)
+    else:
+        return web.json_response(
+            {"status": "unavailable", "reason": "Model not loaded"},
+            status=503
+        )
+
+
+async def start_http_server():
+    """Starts the aiohttp server for health checks and transcription API."""
+    app = web.Application()
+    app.router.add_get("/health", health_check_handler)
+    app.router.add_post("/transcribe", transcribe_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, SERVER_HOST, HEALTH_CHECK_PORT)
+    await site.start()
+    logger.info(f"HTTP API server running on http://{SERVER_HOST}:{HEALTH_CHECK_PORT}")
+    logger.info(f"  POST /transcribe - Upload audio file for transcription")
+    logger.info(f"  GET  /health - Health check endpoint")
+    return site
+
