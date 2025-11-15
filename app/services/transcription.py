@@ -5,7 +5,7 @@ from faster_whisper import WhisperModel
 from concurrent.futures import ThreadPoolExecutor
 
 from app.config.settings import (
-    MODEL_NAME, MODEL_PATH, LANGUAGE, PROCESSING_THREADS, COMPUTE_TYPE
+    MODEL_NAME, MODEL_PATH, LANGUAGE, PROCESSING_THREADS, COMPUTE_TYPE, DEVICE
 )
 from app.utils.logger import logger
 
@@ -18,18 +18,44 @@ server_ready = False
 def load_model():
     """Loads the faster-whisper model into memory. This is a blocking operation."""
     global whisper_model, server_ready
-    logger.info(f"Loading faster-whisper model '{MODEL_NAME}' with compute_type '{COMPUTE_TYPE}'...")
+    import sys
+    
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"🎤 LOADING WHISPER MODEL: {MODEL_NAME}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"   Device: {DEVICE.upper()}", file=sys.stderr)
+    print(f"   Compute Type: {COMPUTE_TYPE}", file=sys.stderr)
+    if DEVICE == "cpu":
+        print(f"   CPU Threads: {PROCESSING_THREADS}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    
+    logger.info(f"Loading faster-whisper model '{MODEL_NAME}' on device '{DEVICE}' with compute_type '{COMPUTE_TYPE}'...")
     try:
         whisper_model = WhisperModel(
             MODEL_NAME,
-            device="cpu",
+            device=DEVICE,
             compute_type=COMPUTE_TYPE,
-            cpu_threads=PROCESSING_THREADS,
+            cpu_threads=PROCESSING_THREADS if DEVICE == "cpu" else None,
             download_root=MODEL_PATH
         )
-        logger.info(f"faster-whisper model '{MODEL_NAME}' loaded successfully.")
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"✅ WHISPER MODEL LOADED SUCCESSFULLY", file=sys.stderr)
+        print(f"   Model: {MODEL_NAME}", file=sys.stderr)
+        print(f"   Device: {DEVICE.upper()}", file=sys.stderr)
+        print(f"   Compute Type: {COMPUTE_TYPE}", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
+        logger.info(f"faster-whisper model '{MODEL_NAME}' loaded successfully on {DEVICE}.")
         server_ready = True
     except Exception as e:
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"❌ FAILED TO LOAD WHISPER MODEL", file=sys.stderr)
+        print(f"   Error: {e}", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
         logger.error(f"Failed to load faster-whisper model: {e}", exc_info=True)
         # The server will not be marked as ready and health checks will fail.
         # You might want to exit here in a containerized environment.

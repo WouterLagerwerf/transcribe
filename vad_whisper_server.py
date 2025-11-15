@@ -5,6 +5,7 @@ import numpy as np
 import logging
 import os
 import signal
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 import torch
@@ -17,7 +18,18 @@ HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", 8080))
 
 # faster-whisper model configuration
 MODEL_SIZE = os.getenv("MODEL_SIZE", "base")  # "tiny", "base", "small", "medium", "large"
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # "int8", "float16", "float32"
+# Device configuration: auto-detect CUDA, allow override
+_device_override = os.getenv("DEVICE", None)
+if _device_override:
+    DEVICE = _device_override.lower()  # "cuda" or "cpu"
+else:
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Auto-select compute type based on device
+_compute_type_override = os.getenv("COMPUTE_TYPE", None)
+if _compute_type_override:
+    COMPUTE_TYPE = _compute_type_override
+else:
+    COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 CPU_THREADS = int(os.getenv("CPU_THREADS", 4))
 LANGUAGE = os.getenv("LANGUAGE", None)  # None for auto-detection
 
@@ -45,7 +57,20 @@ clients = set()
 def load_models():
     """Loads the VAD and Whisper models into memory."""
     global whisper_model, vad_model, server_ready
-    logger.info("Loading Silero VAD model...")
+    
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("🚀 STARTING TRANSCRIPTION SERVER", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"📱 Device: {DEVICE.upper()}", file=sys.stderr)
+    print(f"⚙️  Compute Type: {COMPUTE_TYPE}", file=sys.stderr)
+    if DEVICE == "cuda" and torch.cuda.is_available():
+        print(f"🎮 GPU: {torch.cuda.get_device_name(0)}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("", file=sys.stderr)
+    
+    logger.info(f"Loading Silero VAD model on device '{DEVICE}'...")
+    print(f"🔊 Loading VAD model on {DEVICE.upper()}...", file=sys.stderr)
     try:
         vad_model, _ = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
@@ -53,29 +78,41 @@ def load_models():
             force_reload=False
         )
         vad_model.eval()  # Set to evaluation mode
-        logger.info("Silero VAD model loaded.")
+        vad_model = vad_model.to(torch.device(DEVICE))
+        print(f"✅ VAD model loaded on {DEVICE.upper()}", file=sys.stderr)
+        logger.info(f"Silero VAD model loaded on {DEVICE}.")
     except Exception as e:
+        print(f"❌ VAD model loading failed: {e}", file=sys.stderr)
         logger.error(f"Failed to load Silero VAD model: {e}", exc_info=True)
         return
 
-    logger.info(f"Loading faster-whisper model '{MODEL_SIZE}' with compute_type '{COMPUTE_TYPE}'...")
+    logger.info(f"Loading faster-whisper model '{MODEL_SIZE}' on device '{DEVICE}' with compute_type '{COMPUTE_TYPE}'...")
+    print(f"🎤 Loading Whisper model '{MODEL_SIZE}' on {DEVICE.upper()}...", file=sys.stderr)
     try:
         whisper_model = WhisperModel(
             MODEL_SIZE,
-            device="cpu",
+            device=DEVICE,
             compute_type=COMPUTE_TYPE,
-            cpu_threads=CPU_THREADS
+            cpu_threads=CPU_THREADS if DEVICE == "cpu" else None
         )
-        logger.info(f"faster-whisper model '{MODEL_SIZE}' loaded.")
+        print(f"✅ Whisper model '{MODEL_SIZE}' loaded on {DEVICE.upper()}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("✅ SERVER READY", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
+        logger.info(f"faster-whisper model '{MODEL_SIZE}' loaded on {DEVICE}.")
         server_ready = True
     except Exception as e:
+        print(f"❌ Whisper model loading failed: {e}", file=sys.stderr)
         logger.error(f"Failed to load faster-whisper model: {e}", exc_info=True)
 
 
 def run_vad(audio_float32: np.ndarray) -> float:
     """Run VAD model synchronously (should be called from executor)."""
     with torch.no_grad():
-        speech_prob = vad_model(torch.from_numpy(audio_float32), SAMPLE_RATE).item()
+        audio_tensor = torch.from_numpy(audio_float32).to(torch.device(DEVICE))
+        speech_prob = vad_model(audio_tensor, SAMPLE_RATE).item()
     return speech_prob
 
 

@@ -18,6 +18,19 @@ from app.handlers.websocket_handler import websocket_handler
 
 async def main():
     """Main function to start the HTTP API server and handle shutdown."""
+    import sys
+    from app.config.settings import DEVICE, COMPUTE_TYPE
+    
+    # Print startup banner with device info
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("🚀 STARTING TRANSCRIPTION SERVER", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"📱 Primary Device: {DEVICE.upper()}", file=sys.stderr)
+    print(f"⚙️  Compute Type: {COMPUTE_TYPE}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("", file=sys.stderr)
+    
     # Load models in a separate thread to not block asyncio startup
     loop = asyncio.get_running_loop()
     executor = get_executor()
@@ -40,6 +53,13 @@ async def main():
             await loop.run_in_executor(executor, load_diarization_model)
         except Exception as e:
             logger.warning(f"Diarization loading failed: {e}. Continuing without diarization.")
+    
+    # Print summary after all models loaded
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("✅ ALL MODELS LOADED - SERVER READY", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("", file=sys.stderr)
 
     # Start the HTTP API server (health check + transcription endpoint)
     http_site = await start_http_server()

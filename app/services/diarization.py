@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torchaudio
 
-from app.config.settings import SAMPLE_RATE, USE_DIARIZATION, HF_TOKEN
+from app.config.settings import SAMPLE_RATE, USE_DIARIZATION, HF_TOKEN, DEVICE
 from app.utils.logger import logger
 
 # Try to import pyannote.audio, but handle import errors gracefully
@@ -91,6 +91,14 @@ def load_diarization_model():
         diarization_loaded = False
         return
     
+    import sys
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"👥 LOADING SPEAKER DIARIZATION MODEL", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"   Device: {DEVICE.upper()}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    
     logger.info("Loading pyannote speaker diarization model...")
     logger.info(f"HF_TOKEN: {'Set (length: ' + str(len(HF_TOKEN)) + ')' if HF_TOKEN else 'Not set'}")
     try:
@@ -128,10 +136,23 @@ def load_diarization_model():
                 diarization_pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1"
                 )
-        diarization_pipeline.to(torch.device("cpu"))
+        diarization_pipeline.to(torch.device(DEVICE))
         diarization_loaded = True
-        logger.info("Speaker diarization model loaded successfully.")
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"✅ DIARIZATION MODEL LOADED SUCCESSFULLY", file=sys.stderr)
+        print(f"   Device: {DEVICE.upper()}", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
+        logger.info(f"Speaker diarization model loaded successfully on {DEVICE}.")
     except Exception as e:
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"⚠️  DIARIZATION MODEL LOADING FAILED", file=sys.stderr)
+        print(f"   Error: {e}", file=sys.stderr)
+        print(f"   Server will continue without diarization", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
         logger.error(f"Failed to load speaker diarization model: {e}", exc_info=True)
         logger.warning("Note: pyannote models require HuggingFace authentication token.")
         logger.warning("Set HF_TOKEN environment variable with your HuggingFace token.")
@@ -157,7 +178,8 @@ def diarize_audio(audio_float32: np.ndarray) -> list:
         # pyannote expects audio as a dict with 'waveform' and 'sample_rate'
         # Convert numpy array to torch tensor with shape [channels, samples]
         # For mono audio, we need shape [1, samples]
-        audio_tensor = torch.from_numpy(audio_float32).unsqueeze(0)  # Shape: [1, samples]
+        # Move tensor to the same device as the pipeline
+        audio_tensor = torch.from_numpy(audio_float32).unsqueeze(0).to(torch.device(DEVICE))  # Shape: [1, samples]
         
         # Run diarization
         diarization = diarization_pipeline({

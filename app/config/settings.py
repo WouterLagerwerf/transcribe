@@ -1,10 +1,46 @@
 """Configuration settings loaded from environment variables."""
 
 import os
+import torch
+import sys
 
 # Server Configuration
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", 8080))
+
+# Device Configuration (GPU/CPU)
+# Auto-detect CUDA availability, but allow override via environment variable
+_device_override = os.getenv("DEVICE", None)
+if _device_override:
+    DEVICE = _device_override.lower()  # "cuda" or "cpu"
+    _device_source = "environment variable override"
+else:
+    # Auto-detect: use CUDA if available, otherwise CPU
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    _device_source = "auto-detection"
+
+# Prominent logging of device configuration at import time
+print("=" * 80, file=sys.stderr)
+print("🚀 TRANSCRIPTION SERVER - DEVICE CONFIGURATION", file=sys.stderr)
+print("=" * 80, file=sys.stderr)
+print(f"📱 Device: {DEVICE.upper()}", file=sys.stderr)
+print(f"   Source: {_device_source}", file=sys.stderr)
+
+if DEVICE == "cuda":
+    if torch.cuda.is_available():
+        print(f"   ✅ CUDA Available: YES", file=sys.stderr)
+        print(f"   🎮 GPU Device: {torch.cuda.get_device_name(0)}", file=sys.stderr)
+        print(f"   💾 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB", file=sys.stderr)
+        print(f"   🔢 CUDA Version: {torch.version.cuda}", file=sys.stderr)
+    else:
+        print(f"   ⚠️  CUDA requested but not available - falling back to CPU", file=sys.stderr)
+        DEVICE = "cpu"
+else:
+    print(f"   ℹ️  Using CPU for inference", file=sys.stderr)
+    if torch.cuda.is_available():
+        print(f"   💡 Note: CUDA is available but not being used (set DEVICE=cuda to enable)", file=sys.stderr)
+
+print("=" * 80, file=sys.stderr)
 
 # Model Configuration
 MODEL_NAME = os.getenv("MODEL_NAME", "base")
@@ -27,7 +63,13 @@ VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "100"))  # Padding around
 VAD_MAX_SPEECH_MS = int(os.getenv("VAD_MAX_SPEECH_MS", "5000"))  # Max speech duration before forcing transcription
 
 # faster-whisper configuration
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # "int8", "float16", "float32"
+# Auto-select compute type based on device: float16 for GPU, int8 for CPU (unless overridden)
+_compute_type_override = os.getenv("COMPUTE_TYPE", None)
+if _compute_type_override:
+    COMPUTE_TYPE = _compute_type_override  # "int8", "float16", "float32", "int8_float16"
+else:
+    # Default: float16 for GPU (best performance), int8 for CPU (best performance)
+    COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 
 # Speaker Diarization Configuration
 USE_DIARIZATION = os.getenv("USE_DIARIZATION", "true").lower() == "true"

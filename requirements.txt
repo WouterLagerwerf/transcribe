@@ -1,7 +1,6 @@
 numpy>=1.24.0
 faster-whisper>=1.0.0
-torch>=2.0.0
-torchaudio>=2.0.0
+# torch and torchaudio are installed separately in Dockerfile with CUDA support
 aiohttp>=3.9.0
 pyannote.audio>=3.1.0
 websockets>=12.0

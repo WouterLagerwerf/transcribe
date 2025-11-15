@@ -2,7 +2,7 @@
 
 import numpy as np
 import torch
-from app.config.settings import SAMPLE_RATE, VAD_THRESHOLD
+from app.config.settings import SAMPLE_RATE, VAD_THRESHOLD, DEVICE
 from app.utils.logger import logger
 
 # Global state
@@ -19,7 +19,15 @@ def load_vad_model():
     if vad_loaded:
         return
     
-    logger.info("Loading Silero VAD model...")
+    import sys
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"🔊 LOADING VAD MODEL (Voice Activity Detection)", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"   Device: {DEVICE.upper()}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    
+    logger.info(f"Loading Silero VAD model on device '{DEVICE}'...")
     try:
         vad_model, _ = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
@@ -28,9 +36,24 @@ def load_vad_model():
             trust_repo=True
         )
         vad_model.eval()  # Set to evaluation mode for inference
+        # Move model to the appropriate device (GPU or CPU)
+        vad_model = vad_model.to(torch.device(DEVICE))
         vad_loaded = True
-        logger.info("Silero VAD model loaded successfully.")
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"✅ VAD MODEL LOADED SUCCESSFULLY", file=sys.stderr)
+        print(f"   Device: {DEVICE.upper()}", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
+        logger.info(f"Silero VAD model loaded successfully on {DEVICE}.")
     except Exception as e:
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"⚠️  VAD MODEL LOADING FAILED", file=sys.stderr)
+        print(f"   Error: {e}", file=sys.stderr)
+        print(f"   Server will continue without VAD (time-based transcription)", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("", file=sys.stderr)
         logger.warning(f"Failed to load Silero VAD model: {e}. Server will use time-based transcription.")
         logger.warning("VAD functionality will be disabled. Check that torchaudio is installed.")
         vad_loaded = False
@@ -65,8 +88,8 @@ def detect_speech(audio_float32: np.ndarray) -> float:
     
     try:
         with torch.no_grad():
-            # Convert numpy array to torch tensor
-            audio_tensor = torch.from_numpy(audio_float32)
+            # Convert numpy array to torch tensor and move to the same device as the model
+            audio_tensor = torch.from_numpy(audio_float32).to(torch.device(DEVICE))
             # Run VAD model
             speech_prob = vad_model(audio_tensor, SAMPLE_RATE).item()
         return speech_prob
