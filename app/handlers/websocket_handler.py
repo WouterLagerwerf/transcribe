@@ -8,7 +8,7 @@ import websockets
 from app.config.settings import (
     SAMPLE_RATE, CHUNK_SIZE_SECONDS, USE_VAD,
     VAD_THRESHOLD, VAD_MIN_SILENCE_MS, VAD_SPEECH_PAD_MS, MAX_SEGMENT_SECONDS,
-    VAD_MAX_SPEECH_MS, USE_DIARIZATION
+    VAD_MAX_SPEECH_MS, USE_DIARIZATION, REALTIME_INTERVAL_SECONDS
 )
 from app.utils.logger import logger
 from app.services.transcription import transcribe_synchronous, get_executor, is_server_ready
@@ -17,6 +17,36 @@ from app.services.diarization import diarize_audio, assign_speakers_to_segments,
 
 # Global state for tracking connected clients
 clients = set()
+
+
+async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment_start_time, executor, loop):
+    """
+    Transcribe audio segment and send partial (real-time) results.
+    This runs in the background while speech is ongoing.
+    """
+    try:
+        segments = await loop.run_in_executor(
+            executor, transcribe_synchronous, audio_segment_float32, segment_start_time
+        )
+        
+        # Send each segment as partial result (is_final: false)
+        for segment in segments:
+            if segment["text"]:
+                response_data = {
+                    "transcript": segment["text"],
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "is_final": False  # Mark as partial/real-time result
+                }
+                
+                response = json.dumps(response_data)
+                try:
+                    await websocket.send(response)
+                    logger.debug(f"[{websocket.remote_address}] Real-time transcript: {segment['text']} [{segment['start']:.2f}s - {segment['end']:.2f}s]")
+                except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK):
+                    pass  # Connection closed, stop sending
+    except Exception as e:
+        logger.warning(f"[{websocket.remote_address}] Real-time transcription failed: {e}", exc_info=True)
 
 
 def map_speakers_consistently(diarization_segments, speaker_map, speaker_history, segment_start_time, next_speaker_id):
@@ -97,7 +127,7 @@ def map_speakers_consistently(diarization_segments, speaker_map, speaker_history
 async def process_transcription_with_vad(websocket, audio_queue):
     """
     Manages VAD and transcription for a single client.
-    Only transcribes when speech is detected and ends.
+    Transcribes continuously during speech for real-time updates, and sends final results when speech ends.
     """
     full_audio_buffer = np.array([], dtype=np.int16)
     triggered = False
@@ -106,6 +136,8 @@ async def process_transcription_with_vad(websocket, audio_queue):
     speech_start_time_samples = 0  # Track when speech started
     last_transcription = ""
     absolute_time_offset = 0.0  # Track absolute time offset for timestamps
+    last_realtime_transcription_time = 0.0  # Track when we last sent a real-time transcription
+    last_realtime_transcription_samples = 0  # Track sample position of last real-time transcription
     executor = get_executor()
     loop = asyncio.get_running_loop()
     
@@ -247,6 +279,35 @@ async def process_transcription_with_vad(websocket, audio_queue):
                             current_pos = buffer_samples - len(audio_chunk)
                             speech_start_samples = max(0, current_pos - speech_pad_samples)
                         speech_start_time_samples = len(full_audio_buffer) - len(audio_chunk)  # Track when speech started
+                        last_realtime_transcription_time = 0.0  # Reset real-time transcription timer
+                        last_realtime_transcription_samples = speech_start_samples  # Reset real-time transcription position
+                    
+                    # Real-time transcription: transcribe periodically during continuous speech
+                    if triggered and not force_transcription:
+                        current_time = absolute_time_offset + (len(full_audio_buffer) / SAMPLE_RATE)
+                        time_since_last_realtime = current_time - last_realtime_transcription_time
+                        
+                        # Check if enough time has passed for real-time transcription
+                        if time_since_last_realtime >= REALTIME_INTERVAL_SECONDS:
+                            # Get audio segment from last transcription point to now
+                            realtime_segment_start = max(speech_start_samples, last_realtime_transcription_samples)
+                            realtime_segment_end = len(full_audio_buffer)
+                            
+                            # Only transcribe if we have at least 0.5 seconds of new audio
+                            realtime_segment_duration = (realtime_segment_end - realtime_segment_start) / SAMPLE_RATE
+                            if realtime_segment_duration >= 0.5:  # At least 500ms of new audio
+                                realtime_segment = full_audio_buffer[int(realtime_segment_start):int(realtime_segment_end)]
+                                realtime_segment_float32 = realtime_segment.astype(np.float32) / 32768.0
+                                realtime_segment_start_time = absolute_time_offset + (realtime_segment_start / SAMPLE_RATE)
+                                
+                                # Transcribe in background (don't await - allow processing to continue)
+                                asyncio.create_task(transcribe_and_send_realtime(
+                                    websocket, realtime_segment_float32, realtime_segment_start_time, executor, loop
+                                ))
+                                
+                                # Update tracking
+                                last_realtime_transcription_time = current_time
+                                last_realtime_transcription_samples = realtime_segment_end
                 else:
                     # Silence detected
                     if triggered:
@@ -340,6 +401,9 @@ async def process_transcription_with_vad(websocket, audio_queue):
                     remaining_buffer = full_audio_buffer[int(speech_end_samples):]
                     full_audio_buffer = remaining_buffer
                     speech_start_samples = 0
+                    # Reset real-time transcription tracking for next speech segment
+                    last_realtime_transcription_time = 0.0
+                    last_realtime_transcription_samples = 0
 
         except asyncio.CancelledError:
             break
