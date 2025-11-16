@@ -1,0 +1,92 @@
+services:
+  transcription-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: transcription-server
+    restart: unless-stopped
+    
+    # Resource allocation optimized for i9-9900K (8 cores, 16 threads) + RTX 3070
+    deploy:
+      resources:
+        # CPU allocation: Use 12 threads (leaving 4 for system/Docker overhead)
+        limits:
+          cpus: '12'
+          memory: 24G  # 24GB allocated (32GB total system - 8GB reserved for system)
+        reservations:
+          cpus: '8'  # Guaranteed minimum CPU
+          memory: 20G  # Guaranteed minimum RAM (increased for better performance)
+          devices:
+            - driver: nvidia
+              count: 1  # RTX 3070 (8GB VRAM)
+              capabilities: [gpu]
+    
+    # Port mappings
+    ports:
+      - "${HEALTH_CHECK_PORT:-8080}:8080"  # HTTP API (health check + transcription)
+      - "${WEBSOCKET_PORT:-8765}:8765"     # WebSocket server
+    
+    # Environment variables
+    environment:
+      # Server Configuration
+      - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
+      - HEALTH_CHECK_PORT=${HEALTH_CHECK_PORT:-8080}
+      - WEBSOCKET_PORT=${WEBSOCKET_PORT:-8765}
+      
+      # Device Configuration xGPU-optimized for RTX 3070)
+      - DEVICE=cuda  # Force CUDA for GPU acceleration
+      - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}  # float16 is optimal for RTX 3070 (good performance/accuracy balance)
+      # Suppress cuDNN warnings (transcription works fine without cuDNN 9)
+      - CUDNN_LOGINFO_DBG=0
+      - CUDNN_LOGDEST_DBG=/dev/null
+      
+      # Model Configuration
+      - MODEL_NAME=${MODEL_NAME:-large}  # Options: tiny, base, small, medium, large, large-v2, large-v3
+      - MODEL_PATH=${MODEL_PATH:-.}
+      - LANGUAGE=${LANGUAGE:-en}  # Set to 'en' for English, or override with language code (e.g., es, fr, nl)
+      - PROCESSING_THREADS=${PROCESSING_THREADS:-12}  # Optimized for i9-9900K (12 threads allocated)
+      
+      # VAD (Voice Activity Detection) Configuration
+      - USE_VAD=${USE_VAD:-true}  # Enable/disable VAD
+      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.5}  # Speech detection threshold (0.0-1.0)
+      - VAD_MIN_SILENCE_MS=${VAD_MIN_SILENCE_MS:-500}  # Minimum silence duration to detect end of utterance
+      - VAD_SPEECH_PAD_MS=${VAD_SPEECH_PAD_MS:-100}  # Padding around speech segments
+      - VAD_MAX_SPEECH_MS=${VAD_MAX_SPEECH_MS:-5000}  # Maximum speech duration before forcing transcription
+      
+      # Speaker Diarization Configuration
+      - USE_DIARIZATION=${USE_DIARIZATION:-true}  # Enable/disable speaker diarization
+      - HF_TOKEN=  # HuggingFace token for accessing private models (optional)
+      - HUGGING_FACE_HUB_TOKEN=  # Alternative token variable
+      
+      # Audio Processing Configuration
+      - MAX_SEGMENT_SECONDS=${MAX_SEGMENT_SECONDS:-3600.0}  # Maximum segment size in seconds (60 minutes default)
+    
+    # Shared memory for PyTorch (important for model loading and inference)
+    shm_size: '2gb'
+    
+    # Volume for model caching (speeds up restarts)
+    # Note: Changed from :ro to :rw to allow model downloads
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface:rw
+      - ~/.cache/torch:/root/.cache/torch:rw
+      - transcription-models:/app/models
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s  # Allow time for model loading
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  transcription-models:
+    driver: local
+

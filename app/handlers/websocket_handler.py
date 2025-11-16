@@ -42,9 +42,13 @@ async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment
                 response = json.dumps(response_data)
                 try:
                     await websocket.send(response)
-                    logger.debug(f"[{websocket.remote_address}] Real-time transcript: {segment['text']} [{segment['start']:.2f}s - {segment['end']:.2f}s]")
-                except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK):
-                    pass  # Connection closed, stop sending
+                    logger.info(f"[{websocket.remote_address}] Partial transcript sent: {segment['text']} [{segment['start']:.2f}s - {segment['end']:.2f}s]")
+                except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK) as e:
+                    logger.warning(f"[{websocket.remote_address}] Connection closed while sending partial: {e}")
+                    return  # Connection closed, stop sending
+                except Exception as e:
+                    logger.error(f"[{websocket.remote_address}] Error sending partial transcript: {e}", exc_info=True)
+                    return
     except Exception as e:
         logger.warning(f"[{websocket.remote_address}] Real-time transcription failed: {e}", exc_info=True)
 
@@ -293,21 +297,24 @@ async def process_transcription_with_vad(websocket, audio_queue):
                             realtime_segment_start = max(speech_start_samples, last_realtime_transcription_samples)
                             realtime_segment_end = len(full_audio_buffer)
                             
-                            # Only transcribe if we have at least 0.5 seconds of new audio
+                            # Only transcribe if we have at least 0.2 seconds of new audio (reduced for faster partials)
                             realtime_segment_duration = (realtime_segment_end - realtime_segment_start) / SAMPLE_RATE
-                            if realtime_segment_duration >= 0.5:  # At least 500ms of new audio
+                            if realtime_segment_duration >= 0.2:  # At least 200ms of new audio
                                 realtime_segment = full_audio_buffer[int(realtime_segment_start):int(realtime_segment_end)]
                                 realtime_segment_float32 = realtime_segment.astype(np.float32) / 32768.0
                                 realtime_segment_start_time = absolute_time_offset + (realtime_segment_start / SAMPLE_RATE)
                                 
                                 # Transcribe in background (don't await - allow processing to continue)
-                                asyncio.create_task(transcribe_and_send_realtime(
+                                task = asyncio.create_task(transcribe_and_send_realtime(
                                     websocket, realtime_segment_float32, realtime_segment_start_time, executor, loop
                                 ))
+                                # Add error handling to the task
+                                task.add_done_callback(lambda t: logger.debug(f"Real-time transcription task completed: {t.exception() if t.exception() else 'success'}"))
                                 
                                 # Update tracking
                                 last_realtime_transcription_time = current_time
                                 last_realtime_transcription_samples = realtime_segment_end
+                                logger.info(f"[{websocket.remote_address}] Triggered real-time transcription: {realtime_segment_duration:.2f}s of audio")
                 else:
                     # Silence detected
                     if triggered:
@@ -387,7 +394,12 @@ async def process_transcription_with_vad(websocket, audio_queue):
                                 response = json.dumps(response_data)
                                 try:
                                     await websocket.send(response)
-                                except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK):
+                                    logger.info(f"[{websocket.remote_address}] ✅ Sent WebSocket message (final): {response[:150]}")
+                                except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK) as e:
+                                    logger.warning(f"[{websocket.remote_address}] Connection closed while sending: {e}")
+                                    break
+                                except Exception as e:
+                                    logger.error(f"[{websocket.remote_address}] Error sending WebSocket message: {e}", exc_info=True)
                                     break
                         
                         # Update absolute time offset - we've processed up to speech_end_samples

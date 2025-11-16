@@ -1,49 +1,28 @@
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
 
-# Install Python 3.11
 RUN apt-get update && apt-get install -y \
-    python3.11 \
-    python3.11-dev \
+    python3.12 \
+    python3.12-dev \
     python3-pip \
     ffmpeg \
     git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
 
-# Create symlink for python
-RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
-    ln -s /usr/bin/python3.11 /usr/bin/python3
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python
 
-# Set working directory
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+
 WORKDIR /app
 
-# Copy requirements file
 COPY requirements.txt .
+RUN pip install --no-cache-dir --break-system-packages \
+    torch torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir --break-system-packages -r requirements.txt
 
-# Install PyTorch with CUDA support first (before other dependencies)
-RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# Install remaining Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the application code
 COPY server.py .
 COPY app/ ./app/
 
-# Expose port
-# 8080 for HTTP API server
-EXPOSE 8080
+EXPOSE 8080 8765
 
-# Set default environment variables (can be overridden at runtime)
-ENV SERVER_HOST=0.0.0.0
-ENV HEALTH_CHECK_PORT=8080
-ENV MODEL_NAME=base
-ENV MODEL_PATH=/app/models
-ENV PROCESSING_THREADS=4
-
-# Create directory for models
-RUN mkdir -p /app/models
-
-# Run the server
 CMD ["python", "server.py"]
 

@@ -62,7 +62,7 @@ VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))  # Pauses to de
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "100"))  # Padding around speech
 VAD_MAX_SPEECH_MS = int(os.getenv("VAD_MAX_SPEECH_MS", "5000"))  # Max speech duration before forcing transcription
 # Real-time transcription: transcribe every N seconds during continuous speech (for live updates)
-REALTIME_INTERVAL_SECONDS = float(os.getenv("REALTIME_INTERVAL_SECONDS", "1.5"))  # Transcribe every 1.5 seconds during speech
+REALTIME_INTERVAL_SECONDS = float(os.getenv("REALTIME_INTERVAL_SECONDS", "0.8"))  # Transcribe every 0.8 seconds during speech for faster partials
 
 # faster-whisper configuration
 # Auto-select compute type based on device: float16 for GPU, int8 for CPU (unless overridden)

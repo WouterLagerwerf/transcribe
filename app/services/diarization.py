@@ -188,13 +188,76 @@ def diarize_audio(audio_float32: np.ndarray) -> list:
         })
         
         # Extract segments
+        # pyannote.audio 3.1+ returns DiarizeOutput which contains an Annotation object
         segments = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
-            segments.append({
-                "start": turn.start,
-                "end": turn.end,
-                "speaker": speaker
-            })
+        
+        # Log the type for debugging
+        logger.debug(f"Diarization output type: {type(diarization)}")
+        logger.debug(f"Diarization attributes: {[a for a in dir(diarization) if not a.startswith('_')]}")
+        
+        try:
+            # Try to get the Annotation object from DiarizeOutput
+            annotation = None
+            
+            # Check various possible attribute names for the annotation
+            for attr_name in ['annotation', 'speaker_diarization', 'diarization']:
+                if hasattr(diarization, attr_name):
+                    attr_value = getattr(diarization, attr_name)
+                    logger.debug(f"Found attribute '{attr_name}': {type(attr_value)}")
+                    # Check if this attribute has itertracks (it's an Annotation)
+                    if hasattr(attr_value, 'itertracks'):
+                        annotation = attr_value
+                        logger.debug(f"Using '{attr_name}' as annotation")
+                        break
+            
+            # If no annotation found via attributes, check if diarization itself is an Annotation
+            if annotation is None:
+                if hasattr(diarization, 'itertracks'):
+                    annotation = diarization
+                    logger.debug("Using diarization directly as annotation")
+                elif isinstance(diarization, dict):
+                    # Try dict access
+                    for key in ['annotation', 'speaker_diarization', 'diarization']:
+                        if key in diarization and hasattr(diarization[key], 'itertracks'):
+                            annotation = diarization[key]
+                            logger.debug(f"Using dict key '{key}' as annotation")
+                            break
+            
+            # If still no annotation, try importing Annotation and checking type
+            if annotation is None:
+                from pyannote.core import Annotation
+                if isinstance(diarization, Annotation):
+                    annotation = diarization
+                    logger.debug("Diarization is an Annotation instance")
+            
+            # If we found an annotation, iterate over it
+            if annotation is not None:
+                for segment, track, label in annotation.itertracks(yield_label=True):
+                    segments.append({
+                        "start": segment.start,
+                        "end": segment.end,
+                        "speaker": label
+                    })
+            else:
+                # Last resort: try to access segments directly
+                logger.warning("Could not find annotation attribute, trying direct access...")
+                if hasattr(diarization, 'get_timeline'):
+                    timeline = diarization.get_timeline()
+                    for segment in timeline:
+                        label = diarization[segment]
+                        segments.append({
+                            "start": segment.start,
+                            "end": segment.end,
+                            "speaker": str(label) if label else "SPEAKER_00"
+                        })
+                else:
+                    raise AttributeError(f"Cannot find annotation in diarization output. Type: {type(diarization)}, Attributes: {[a for a in dir(diarization) if not a.startswith('_')]}")
+                    
+        except Exception as e:
+            logger.error(f"Error extracting diarization segments: {e}", exc_info=True)
+            logger.error(f"Diarization type: {type(diarization)}")
+            logger.error(f"Diarization repr: {repr(diarization)}")
+            raise
         
         logger.info(f"Diarization completed: {len(segments)} speaker segments found")
         if segments:

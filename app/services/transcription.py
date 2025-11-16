@@ -32,13 +32,16 @@ def load_model():
     
     logger.info(f"Loading faster-whisper model '{MODEL_NAME}' on device '{DEVICE}' with compute_type '{COMPUTE_TYPE}'...")
     try:
-        whisper_model = WhisperModel(
-            MODEL_NAME,
-            device=DEVICE,
-            compute_type=COMPUTE_TYPE,
-            cpu_threads=PROCESSING_THREADS if DEVICE == "cpu" else None,
-            download_root=MODEL_PATH
-        )
+        # Build kwargs - only include cpu_threads for CPU device
+        model_kwargs = {
+            "device": DEVICE,
+            "compute_type": COMPUTE_TYPE,
+            "download_root": MODEL_PATH
+        }
+        if DEVICE == "cpu":
+            model_kwargs["cpu_threads"] = PROCESSING_THREADS
+        
+        whisper_model = WhisperModel(MODEL_NAME, **model_kwargs)
         print("", file=sys.stderr)
         print("=" * 80, file=sys.stderr)
         print(f"✅ WHISPER MODEL LOADED SUCCESSFULLY", file=sys.stderr)
