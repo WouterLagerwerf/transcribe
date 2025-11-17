@@ -77,3 +77,13 @@ else:
 USE_DIARIZATION = os.getenv("USE_DIARIZATION", "true").lower() == "true"
 HF_TOKEN = os.getenv("HF_TOKEN", None)  # HuggingFace token for private models (optional)
 
+# Speaker Enrollment Configuration
+ENROLLMENT_SIMILARITY_THRESHOLD = float(os.getenv("ENROLLMENT_SIMILARITY_THRESHOLD", "0.72"))  # Cosine similarity threshold (0.0-1.0, higher = stricter matching)
+ENROLLMENT_MIN_SEGMENT_DURATION = float(os.getenv("ENROLLMENT_MIN_SEGMENT_DURATION", "0.35"))  # Minimum segment duration in seconds for reliable embedding
+ENROLLMENT_LEARNING_RATE = float(os.getenv("ENROLLMENT_LEARNING_RATE", "0.2"))  # Learning rate for voiceprint updates (0.0-1.0, lower = more stable, higher = adapts faster)
+ENROLLMENT_MIN_CONFIDENCE = float(os.getenv("ENROLLMENT_MIN_CONFIDENCE", "0.68"))  # Minimum confidence to enroll new speaker (prevents noise enrollment)
+ENROLLMENT_ADAPTIVE_THRESHOLD = os.getenv("ENROLLMENT_ADAPTIVE_THRESHOLD", "true").lower() == "true"  # Adjust threshold based on number of speakers
+ENROLLMENT_MAX_SPEAKERS = int(os.getenv("ENROLLMENT_MAX_SPEAKERS", "10"))  # Maximum number of speakers to enroll
+ENROLLMENT_MIN_SAMPLES = int(os.getenv("ENROLLMENT_MIN_SAMPLES", "2"))  # Minimum number of embeddings before considering speaker "stable"
+ENROLLMENT_CONFIDENCE_WINDOW = int(os.getenv("ENROLLMENT_CONFIDENCE_WINDOW", "5"))  # Number of recent similarities to track for confidence
+

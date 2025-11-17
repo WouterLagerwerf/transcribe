@@ -136,6 +136,36 @@ def load_diarization_model():
                 diarization_pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1"
                 )
+        
+        # Configure pipeline parameters for better speaker separation
+        # Make clustering stricter to better distinguish between different speakers
+        if hasattr(diarization_pipeline, 'instantiate'):
+            # Try to configure clustering parameters for multi-speaker diarization
+            try:
+                # Access the clustering component and tune it for better separation
+                if hasattr(diarization_pipeline, '_pipeline'):
+                    # Try to set parameters on the clustering step
+                    pipeline_components = diarization_pipeline._pipeline
+                    for component_name, component in pipeline_components.items():
+                        if 'clustering' in component_name.lower():
+                            # Try to configure min/max speakers if the component supports it
+                            if hasattr(component, 'min_speakers'):
+                                component.min_speakers = 1
+                            if hasattr(component, 'max_speakers'):
+                                component.max_speakers = 10
+                            # Try to make clustering stricter (lower threshold = more separation)
+                            # This helps distinguish between similar voices
+                            if hasattr(component, 'threshold'):
+                                # Lower threshold = more speakers detected (stricter clustering)
+                                component.threshold = 0.7  # Default is usually 0.7-0.9, lower = more separation
+                                logger.info(f"Set clustering threshold to 0.7 for better speaker separation")
+                            if hasattr(component, 'min_cluster_size'):
+                                # Smaller min cluster size = more sensitive to speaker differences
+                                component.min_cluster_size = 1
+                            logger.info(f"Configured {component_name} component for better speaker separation")
+            except Exception as e:
+                logger.debug(f"Could not configure pipeline parameters: {e}")
+        
         diarization_pipeline.to(torch.device(DEVICE))
         diarization_loaded = True
         print("", file=sys.stderr)
@@ -181,11 +211,23 @@ def diarize_audio(audio_float32: np.ndarray) -> list:
         # Move tensor to the same device as the pipeline
         audio_tensor = torch.from_numpy(audio_float32).unsqueeze(0).to(torch.device(DEVICE))  # Shape: [1, samples]
         
-        # Run diarization
-        diarization = diarization_pipeline({
+        # Run diarization with parameters optimized for 2-speaker scenarios
+        # Try to pass min_speakers and max_speakers if supported
+        diarization_input = {
             "waveform": audio_tensor,
             "sample_rate": SAMPLE_RATE
-        })
+        }
+        
+        # Try to add speaker count hints if the pipeline supports it
+        try:
+            # Some pyannote versions support num_speakers parameter
+            # Don't set a fixed number, let it detect up to 10 speakers
+            if hasattr(diarization_pipeline, 'max_speakers'):
+                diarization_input["max_speakers"] = 10
+        except:
+            pass
+        
+        diarization = diarization_pipeline(diarization_input)
         
         # Extract segments
         # pyannote.audio 3.1+ returns DiarizeOutput which contains an Annotation object

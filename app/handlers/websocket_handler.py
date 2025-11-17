@@ -14,12 +14,16 @@ from app.utils.logger import logger
 from app.services.transcription import transcribe_synchronous, get_executor, is_server_ready
 from app.services.vad import load_vad_model, detect_speech_in_chunk, is_vad_loaded
 from app.services.diarization import diarize_audio, assign_speakers_to_segments, is_diarization_loaded
+from app.services.speaker_enrollment import SpeakerEnrollment, load_embedding_model, embedding_loaded
+from typing import Dict
 
 # Global state for tracking connected clients
 clients = set()
+# Map: websocket -> SpeakerEnrollment instance
+speaker_enrollments: Dict = {}
 
 
-async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment_start_time, executor, loop):
+async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment_start_time, executor, loop, enrollment=None):
     """
     Transcribe audio segment and send partial (real-time) results.
     This runs in the background while speech is ongoing.
@@ -28,6 +32,19 @@ async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment
         segments = await loop.run_in_executor(
             executor, transcribe_synchronous, audio_segment_float32, segment_start_time
         )
+        
+        # Identify speaker using enrollment if available
+        if enrollment is not None and USE_DIARIZATION and segments:
+            try:
+                speaker_id, similarity = await loop.run_in_executor(
+                    executor, enrollment.process_segment, audio_segment_float32
+                )
+                if speaker_id >= 0:
+                    speaker_label = f"SPEAKER_{speaker_id:02d}"
+                    for segment in segments:
+                        segment["speaker"] = speaker_label
+            except Exception as e:
+                logger.debug(f"[{websocket.remote_address}] Enrollment failed in real-time: {e}")
         
         # Send each segment as partial result (is_final: false)
         for segment in segments:
@@ -38,11 +55,15 @@ async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment
                     "end": segment["end"],
                     "is_final": False  # Mark as partial/real-time result
                 }
+                # Add speaker if available
+                if segment.get("speaker"):
+                    response_data["speaker"] = segment["speaker"]
                 
                 response = json.dumps(response_data)
                 try:
                     await websocket.send(response)
-                    logger.info(f"[{websocket.remote_address}] Partial transcript sent: {segment['text']} [{segment['start']:.2f}s - {segment['end']:.2f}s]")
+                    speaker_info = f" [{segment.get('speaker', '')}]" if segment.get('speaker') else ""
+                    logger.info(f"[{websocket.remote_address}] Partial transcript sent: {segment['text']}{speaker_info} [{segment['start']:.2f}s - {segment['end']:.2f}s]")
                 except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK) as e:
                     logger.warning(f"[{websocket.remote_address}] Connection closed while sending partial: {e}")
                     return  # Connection closed, stop sending
@@ -56,6 +77,7 @@ async def transcribe_and_send_realtime(websocket, audio_segment_float32, segment
 def map_speakers_consistently(diarization_segments, speaker_map, speaker_history, segment_start_time, next_speaker_id):
     """
     Map pyannote speaker labels to consistent global speaker IDs across segments.
+    Uses multiple strategies to better distinguish between different speakers.
     
     Args:
         diarization_segments: List of diarization segments with 'speaker' labels
@@ -72,13 +94,62 @@ def map_speakers_consistently(diarization_segments, speaker_map, speaker_history
     updated_speaker_history = speaker_history.copy()
     updated_next_speaker_id = next_speaker_id
     
-    # Clean old history (keep only speakers from last 10 seconds)
+    # Clean old history (keep only speakers from last 15 seconds for better tracking)
     current_time = segment_start_time
     updated_speaker_history = [(sid, end_time) for sid, end_time in updated_speaker_history 
-                               if current_time - end_time < 10.0]
+                               if current_time - end_time < 15.0]
     
     # Get unique pyannote speakers in this segment
     pyannote_speakers = set(seg["speaker"] for seg in diarization_segments)
+    
+    # Strategy: Track which speakers appear together vs separately
+    # If two speakers consistently appear in separate segments, they're different people
+    # If they appear together/overlapping, might be pitch variation
+    
+    # Strategy 1: Analyze speaker patterns in this segment
+    # Multiple speakers detected - analyze their timing patterns
+    if len(pyannote_speakers) > 1:
+        segment_times = [(seg["start"], seg["end"], seg["speaker"]) for seg in diarization_segments]
+        segment_times.sort(key=lambda x: x[0])  # Sort by start time
+        
+        # Calculate total duration and overlap for each speaker pair
+        speaker_durations = {}
+        speaker_overlaps = {}
+        
+        for seg in diarization_segments:
+            speaker = seg["speaker"]
+            duration = seg["end"] - seg["start"]
+            speaker_durations[speaker] = speaker_durations.get(speaker, 0) + duration
+        
+        # Check overlaps between speakers
+        for i in range(len(segment_times)):
+            for j in range(i + 1, len(segment_times)):
+                seg1_start, seg1_end, speaker1 = segment_times[i]
+                seg2_start, seg2_end, speaker2 = segment_times[j]
+                
+                # Calculate overlap
+                overlap_start = max(seg1_start, seg2_start)
+                overlap_end = min(seg1_end, seg2_end)
+                overlap_duration = max(0, overlap_end - overlap_start)
+                
+                if overlap_duration > 0:
+                    key = tuple(sorted([speaker1, speaker2]))
+                    speaker_overlaps[key] = speaker_overlaps.get(key, 0) + overlap_duration
+        
+        # Only merge if speakers have significant overlap (> 50% of shorter segment)
+        # This indicates pitch variation rather than different speakers
+        for (sp1, sp2), overlap_duration in speaker_overlaps.items():
+            min_duration = min(speaker_durations.get(sp1, 0), speaker_durations.get(sp2, 0))
+            overlap_ratio = overlap_duration / min_duration if min_duration > 0 else 0
+            
+            if overlap_ratio > 0.5:  # More than 50% overlap - likely same speaker
+                logger.debug(f"Speakers {sp1} and {sp2} have {overlap_ratio:.1%} overlap - likely pitch variation, will merge")
+                if sp2 not in updated_speaker_map and sp1 in updated_speaker_map:
+                    updated_speaker_map[sp2] = updated_speaker_map[sp1]
+                elif sp1 not in updated_speaker_map and sp2 in updated_speaker_map:
+                    updated_speaker_map[sp1] = updated_speaker_map[sp2]
+            else:
+                logger.debug(f"Speakers {sp1} and {sp2} have {overlap_ratio:.1%} overlap - different speakers, keeping separate")
     
     # Map each pyannote speaker to a global ID
     for pyannote_speaker in pyannote_speakers:
@@ -87,30 +158,54 @@ def map_speakers_consistently(diarization_segments, speaker_map, speaker_history
             best_match = None
             min_time_gap = float('inf')
             
-            # Strategy 1: If there's only one speaker in history and one in new segment, likely same speaker
+            # Strategy 2: Match based on timing patterns
+            # If there's only one speaker in history and one in new segment, likely same speaker
             if len(updated_speaker_history) == 1 and len(pyannote_speakers) == 1:
-                best_match = updated_speaker_history[0][0]
-                min_time_gap = segment_start_time - updated_speaker_history[0][1]
-                logger.debug(f"Single speaker match: {pyannote_speaker} -> {best_match} (gap: {min_time_gap:.2f}s)")
-            else:
-                # Strategy 2: Find the most recent speaker that ended close to this segment start
+                time_gap = segment_start_time - updated_speaker_history[0][1]
+                # Use shorter threshold (2.5s) - more conservative to avoid merging different speakers
+                if time_gap < 2.5:
+                    best_match = updated_speaker_history[0][0]
+                    min_time_gap = time_gap
+                    logger.debug(f"Single speaker match: {pyannote_speaker} -> {best_match} (gap: {min_time_gap:.2f}s)")
+            
+            # Strategy 3: Find the most recent speaker, but be more conservative
+            # Only match if gap is short (< 2.5s) to avoid merging different speakers
+            if best_match is None:
                 for global_id, end_time in updated_speaker_history:
                     time_gap = segment_start_time - end_time
-                    # If speaker ended within 5 seconds before this segment, consider it a match
-                    # Increased from 3s to 5s to handle longer pauses better
-                    if 0 <= time_gap < 5.0 and time_gap < min_time_gap:
+                    # Shorter threshold: only match if very close (< 2.5 seconds)
+                    # This prevents merging you and your gf while still tracking same speaker
+                    if 0 <= time_gap < 2.5 and time_gap < min_time_gap:
                         min_time_gap = time_gap
                         best_match = global_id
             
-            if best_match is not None and min_time_gap < 5.0:
+            # Strategy 4: If multiple speakers in history, prefer the one that appears most frequently
+            # This helps maintain consistency for the same speaker
+            if best_match is None and len(updated_speaker_history) > 1:
+                # Count how often each speaker appears in history
+                speaker_counts = {}
+                for sid, _ in updated_speaker_history:
+                    speaker_counts[sid] = speaker_counts.get(sid, 0) + 1
+                
+                # Find the most frequent speaker that's close enough
+                most_frequent_speaker = max(speaker_counts.items(), key=lambda x: x[1])[0]
+                for global_id, end_time in updated_speaker_history:
+                    if global_id == most_frequent_speaker:
+                        time_gap = segment_start_time - end_time
+                        if 0 <= time_gap < 3.0 and time_gap < min_time_gap:
+                            min_time_gap = time_gap
+                            best_match = global_id
+            
+            if best_match is not None and min_time_gap < 3.0:
                 # Map to existing speaker
                 updated_speaker_map[pyannote_speaker] = best_match
                 logger.debug(f"Mapped {pyannote_speaker} to existing speaker {best_match} (gap: {min_time_gap:.2f}s)")
             else:
                 # New speaker - assign new global ID
+                # This is more likely to happen now, which helps distinguish you and your gf
                 updated_speaker_map[pyannote_speaker] = updated_next_speaker_id
                 updated_next_speaker_id += 1
-                logger.debug(f"Mapped {pyannote_speaker} to new speaker {updated_speaker_map[pyannote_speaker]}")
+                logger.info(f"New speaker detected: {pyannote_speaker} -> SPEAKER_{updated_speaker_map[pyannote_speaker]:02d} (gap: {min_time_gap:.2f}s if checked)")
     
     # Update segments with mapped speaker IDs
     for seg in diarization_segments:
@@ -128,7 +223,7 @@ def map_speakers_consistently(diarization_segments, speaker_map, speaker_history
     return updated_segments, updated_speaker_map, updated_speaker_history, updated_next_speaker_id
 
 
-async def process_transcription_with_vad(websocket, audio_queue):
+async def process_transcription_with_vad(websocket, audio_queue, enrollment=None):
     """
     Manages VAD and transcription for a single client.
     Transcribes continuously during speech for real-time updates, and sends final results when speech ends.
@@ -179,14 +274,61 @@ async def process_transcription_with_vad(websocket, audio_queue):
                             executor, transcribe_synchronous, speech_segment_float32, segment_start_time
                         )
                         
-                        # Perform speaker diarization if enabled
-                        if USE_DIARIZATION and is_diarization_loaded() and segments:
-                            try:
-                                diarization_segments = await loop.run_in_executor(
-                                    executor, diarize_audio, speech_segment_float32
-                                )
-                                if diarization_segments:
-                                    # Adjust diarization timestamps to match absolute time
+                        # Perform speaker identification using enrollment + diarization for overlapping speech
+                        if USE_DIARIZATION and segments:
+                            # First, run diarization to detect speaker segments (including overlapping)
+                            diarization_segments = None
+                            if is_diarization_loaded():
+                                try:
+                                    diarization_segments = await loop.run_in_executor(
+                                        executor, diarize_audio, speech_segment_float32
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
+                            
+                            # Use enrollment with diarization to handle overlapping speech
+                            if enrollment is not None:
+                                try:
+                                    if diarization_segments:
+                                        # Map pyannote speakers to enrollment IDs
+                                        pyannote_to_enrollment = await loop.run_in_executor(
+                                            executor, enrollment.map_diarization_segments, speech_segment_float32, diarization_segments
+                                        )
+                                        
+                                        # Replace pyannote speaker labels with enrollment IDs
+                                        adjusted_diarization = []
+                                        for diar_seg in diarization_segments:
+                                            pyannote_speaker = diar_seg.get("speaker")
+                                            enrollment_id = pyannote_to_enrollment.get(pyannote_speaker)
+                                            
+                                            if enrollment_id is not None:
+                                                adjusted_diarization.append({
+                                                    "start": diar_seg["start"] + segment_start_time,
+                                                    "end": diar_seg["end"] + segment_start_time,
+                                                    "speaker": f"SPEAKER_{enrollment_id:02d}"
+                                                })
+                                        
+                                        if adjusted_diarization:
+                                            segments = assign_speakers_to_segments(segments, adjusted_diarization)
+                                            unique_speakers = len(set(s['speaker'] for s in adjusted_diarization))
+                                            logger.info(f"[{websocket.remote_address}] Final diarization + enrollment: {len(adjusted_diarization)} segments, {unique_speakers} speakers")
+                                    else:
+                                        # No diarization - process entire segment
+                                        speaker_id, similarity = await loop.run_in_executor(
+                                            executor, enrollment.process_segment, speech_segment_float32, None
+                                        )
+                                        if speaker_id >= 0:
+                                            speaker_label = f"SPEAKER_{speaker_id:02d}"
+                                            for segment in segments:
+                                                segment["speaker"] = speaker_label
+                                            logger.info(f"[{websocket.remote_address}] Speaker identified via enrollment: {speaker_label} (similarity: {similarity:.3f})")
+                                except Exception as e:
+                                    logger.warning(f"[{websocket.remote_address}] Enrollment failed: {e}", exc_info=True)
+                                    enrollment = None  # Disable enrollment if it fails
+                            
+                            # Fallback to pyannote diarization only if enrollment not available
+                            if enrollment is None and diarization_segments:
+                                try:
                                     adjusted_diarization = []
                                     for diar_seg in diarization_segments:
                                         adjusted_diarization.append({
@@ -195,15 +337,14 @@ async def process_transcription_with_vad(websocket, audio_queue):
                                             "speaker": diar_seg["speaker"]
                                         })
                                     
-                                    # Map speakers consistently across segments
                                     mapped_diarization, speaker_map, speaker_history, next_speaker_id = map_speakers_consistently(
                                         adjusted_diarization, speaker_map, speaker_history, segment_start_time, next_speaker_id
                                     )
                                     
                                     segments = assign_speakers_to_segments(segments, mapped_diarization)
-                                    logger.info(f"[{websocket.remote_address}] Final diarization completed: {len(mapped_diarization)} speaker segments")
-                            except Exception as e:
-                                logger.warning(f"[{websocket.remote_address}] Final diarization failed: {e}", exc_info=True)
+                                    logger.info(f"[{websocket.remote_address}] Final diarization completed: {len(mapped_diarization)} speaker segments, active speakers: {len(set(s['speaker'] for s in mapped_diarization))}")
+                                except Exception as e:
+                                    logger.warning(f"[{websocket.remote_address}] Final diarization failed: {e}", exc_info=True)
                         
                         # Send each segment with timestamps (and speaker if available)
                         for segment in segments:
@@ -306,7 +447,7 @@ async def process_transcription_with_vad(websocket, audio_queue):
                                 
                                 # Transcribe in background (don't await - allow processing to continue)
                                 task = asyncio.create_task(transcribe_and_send_realtime(
-                                    websocket, realtime_segment_float32, realtime_segment_start_time, executor, loop
+                                    websocket, realtime_segment_float32, realtime_segment_start_time, executor, loop, enrollment
                                 ))
                                 # Add error handling to the task
                                 task.add_done_callback(lambda t: logger.debug(f"Real-time transcription task completed: {t.exception() if t.exception() else 'success'}"))
@@ -350,14 +491,61 @@ async def process_transcription_with_vad(websocket, audio_queue):
                             executor, transcribe_synchronous, speech_segment_float32, segment_start_time
                         )
                         
-                        # Perform speaker diarization if enabled
-                        if USE_DIARIZATION and is_diarization_loaded() and segments:
-                            try:
-                                diarization_segments = await loop.run_in_executor(
-                                    executor, diarize_audio, speech_segment_float32
-                                )
-                                if diarization_segments:
-                                    # Adjust diarization timestamps to match absolute time
+                        # Perform speaker identification using enrollment + diarization for overlapping speech
+                        if USE_DIARIZATION and segments:
+                            # First, run diarization to detect speaker segments (including overlapping)
+                            diarization_segments = None
+                            if is_diarization_loaded():
+                                try:
+                                    diarization_segments = await loop.run_in_executor(
+                                        executor, diarize_audio, speech_segment_float32
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
+                            
+                            # Use enrollment with diarization to handle overlapping speech
+                            if enrollment is not None:
+                                try:
+                                    if diarization_segments:
+                                        # Map pyannote speakers to enrollment IDs
+                                        pyannote_to_enrollment = await loop.run_in_executor(
+                                            executor, enrollment.map_diarization_segments, speech_segment_float32, diarization_segments
+                                        )
+                                        
+                                        # Replace pyannote speaker labels with enrollment IDs
+                                        adjusted_diarization = []
+                                        for diar_seg in diarization_segments:
+                                            pyannote_speaker = diar_seg.get("speaker")
+                                            enrollment_id = pyannote_to_enrollment.get(pyannote_speaker)
+                                            
+                                            if enrollment_id is not None:
+                                                adjusted_diarization.append({
+                                                    "start": diar_seg["start"] + segment_start_time,
+                                                    "end": diar_seg["end"] + segment_start_time,
+                                                    "speaker": f"SPEAKER_{enrollment_id:02d}"
+                                                })
+                                        
+                                        if adjusted_diarization:
+                                            segments = assign_speakers_to_segments(segments, adjusted_diarization)
+                                            unique_speakers = len(set(s['speaker'] for s in adjusted_diarization))
+                                            logger.info(f"[{websocket.remote_address}] Diarization + enrollment: {len(adjusted_diarization)} segments, {unique_speakers} speakers")
+                                    else:
+                                        # No diarization - process entire segment
+                                        speaker_id, similarity = await loop.run_in_executor(
+                                            executor, enrollment.process_segment, speech_segment_float32, None
+                                        )
+                                        if speaker_id >= 0:
+                                            speaker_label = f"SPEAKER_{speaker_id:02d}"
+                                            for segment in segments:
+                                                segment["speaker"] = speaker_label
+                                            logger.info(f"[{websocket.remote_address}] Speaker identified via enrollment: {speaker_label} (similarity: {similarity:.3f})")
+                                except Exception as e:
+                                    logger.warning(f"[{websocket.remote_address}] Enrollment failed: {e}", exc_info=True)
+                                    enrollment = None  # Disable enrollment if it fails
+                            
+                            # Fallback to pyannote diarization only if enrollment not available
+                            if enrollment is None and diarization_segments:
+                                try:
                                     adjusted_diarization = []
                                     for diar_seg in diarization_segments:
                                         adjusted_diarization.append({
@@ -366,15 +554,14 @@ async def process_transcription_with_vad(websocket, audio_queue):
                                             "speaker": diar_seg["speaker"]
                                         })
                                     
-                                    # Map speakers consistently across segments
                                     mapped_diarization, speaker_map, speaker_history, next_speaker_id = map_speakers_consistently(
                                         adjusted_diarization, speaker_map, speaker_history, segment_start_time, next_speaker_id
                                     )
                                     
                                     segments = assign_speakers_to_segments(segments, mapped_diarization)
                                     logger.info(f"[{websocket.remote_address}] Diarization completed: {len(mapped_diarization)} speaker segments, active speakers: {len(set(s['speaker'] for s in mapped_diarization))}")
-                            except Exception as e:
-                                logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
+                                except Exception as e:
+                                    logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
                         
                         # Send each segment with timestamps (and speaker if available)
                         for segment in segments:
@@ -424,7 +611,7 @@ async def process_transcription_with_vad(websocket, audio_queue):
             break
 
 
-async def process_transcription_time_based(websocket, audio_queue):
+async def process_transcription_time_based(websocket, audio_queue, enrollment=None):
     """
     Manages transcription using time-based chunking (fallback when VAD disabled).
     Processes audio in fixed time intervals.
@@ -451,14 +638,61 @@ async def process_transcription_time_based(websocket, audio_queue):
                         executor, transcribe_synchronous, audio_float32, absolute_time_offset
                     )
                     
-                    # Perform speaker diarization if enabled
-                    if USE_DIARIZATION and is_diarization_loaded() and segments:
-                        try:
-                            diarization_segments = await loop.run_in_executor(
-                                executor, diarize_audio, audio_float32
-                            )
-                            if diarization_segments:
-                                # Adjust diarization timestamps to match absolute time
+                    # Perform speaker identification using enrollment + diarization for overlapping speech
+                    if USE_DIARIZATION and segments:
+                        # First, run diarization to detect speaker segments (including overlapping)
+                        diarization_segments = None
+                        if is_diarization_loaded():
+                            try:
+                                diarization_segments = await loop.run_in_executor(
+                                    executor, diarize_audio, audio_float32
+                                )
+                            except Exception as e:
+                                logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
+                        
+                        # Use enrollment with diarization to handle overlapping speech
+                        if enrollment is not None:
+                            try:
+                                if diarization_segments:
+                                    # Map pyannote speakers to enrollment IDs
+                                    pyannote_to_enrollment = await loop.run_in_executor(
+                                        executor, enrollment.map_diarization_segments, audio_float32, diarization_segments
+                                    )
+                                    
+                                    # Replace pyannote speaker labels with enrollment IDs
+                                    adjusted_diarization = []
+                                    for diar_seg in diarization_segments:
+                                        pyannote_speaker = diar_seg.get("speaker")
+                                        enrollment_id = pyannote_to_enrollment.get(pyannote_speaker)
+                                        
+                                        if enrollment_id is not None:
+                                            adjusted_diarization.append({
+                                                "start": diar_seg["start"] + absolute_time_offset,
+                                                "end": diar_seg["end"] + absolute_time_offset,
+                                                "speaker": f"SPEAKER_{enrollment_id:02d}"
+                                            })
+                                    
+                                    if adjusted_diarization:
+                                        segments = assign_speakers_to_segments(segments, adjusted_diarization)
+                                        unique_speakers = len(set(s['speaker'] for s in adjusted_diarization))
+                                        logger.info(f"[{websocket.remote_address}] Diarization + enrollment: {len(adjusted_diarization)} segments, {unique_speakers} speakers")
+                                else:
+                                    # No diarization - process entire segment
+                                    speaker_id, similarity = await loop.run_in_executor(
+                                        executor, enrollment.process_segment, audio_float32, None
+                                    )
+                                    if speaker_id >= 0:
+                                        speaker_label = f"SPEAKER_{speaker_id:02d}"
+                                        for segment in segments:
+                                            segment["speaker"] = speaker_label
+                                        logger.info(f"[{websocket.remote_address}] Speaker identified via enrollment: {speaker_label} (similarity: {similarity:.3f})")
+                            except Exception as e:
+                                logger.warning(f"[{websocket.remote_address}] Enrollment failed: {e}", exc_info=True)
+                                enrollment = None
+                        
+                        # Fallback to pyannote diarization only
+                        if enrollment is None and diarization_segments:
+                            try:
                                 adjusted_diarization = []
                                 for diar_seg in diarization_segments:
                                     adjusted_diarization.append({
@@ -466,15 +700,12 @@ async def process_transcription_time_based(websocket, audio_queue):
                                         "end": diar_seg["end"] + absolute_time_offset,
                                         "speaker": diar_seg["speaker"]
                                     })
-                                
-                                # Map speakers consistently across segments
                                 mapped_diarization, speaker_map, speaker_history, next_speaker_id = map_speakers_consistently(
                                     adjusted_diarization, speaker_map, speaker_history, absolute_time_offset, next_speaker_id
                                 )
-                                
                                 segments = assign_speakers_to_segments(segments, mapped_diarization)
-                        except Exception as e:
-                            logger.warning(f"[{websocket.remote_address}] Final diarization failed: {e}", exc_info=True)
+                            except Exception as e:
+                                logger.warning(f"[{websocket.remote_address}] Final diarization failed: {e}", exc_info=True)
                     
                     # Send each segment with timestamps (and speaker if available)
                     for segment in segments:
@@ -508,14 +739,53 @@ async def process_transcription_time_based(websocket, audio_queue):
                     executor, transcribe_synchronous, audio_float32, absolute_time_offset
                 )
 
-                # Perform speaker diarization if enabled
-                if USE_DIARIZATION and is_diarization_loaded() and segments:
-                    try:
-                        diarization_segments = await loop.run_in_executor(
-                            executor, diarize_audio, audio_float32
-                        )
-                        if diarization_segments:
-                            # Adjust diarization timestamps to match absolute time
+                # Perform speaker identification using enrollment + diarization for overlapping speech
+                if USE_DIARIZATION and segments:
+                    # First, run diarization to detect speaker segments (including overlapping)
+                    diarization_segments = None
+                    if is_diarization_loaded():
+                        try:
+                            diarization_segments = await loop.run_in_executor(
+                                executor, diarize_audio, audio_float32
+                            )
+                        except Exception as e:
+                            logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
+                    
+                    # Use enrollment with diarization to handle overlapping speech
+                    if enrollment is not None:
+                        try:
+                            # Process segment with diarization info
+                            speaker_id, similarity = await loop.run_in_executor(
+                                executor, enrollment.process_segment, audio_float32, diarization_segments
+                            )
+                            
+                            if diarization_segments:
+                                # Use diarization to assign speakers per segment (handles overlapping)
+                                adjusted_diarization = []
+                                for diar_seg in diarization_segments:
+                                    adjusted_diarization.append({
+                                        "start": diar_seg["start"] + absolute_time_offset,
+                                        "end": diar_seg["end"] + absolute_time_offset,
+                                        "speaker": diar_seg["speaker"]
+                                    })
+                                mapped_diarization, speaker_map, speaker_history, next_speaker_id = map_speakers_consistently(
+                                    adjusted_diarization, speaker_map, speaker_history, absolute_time_offset, next_speaker_id
+                                )
+                                segments = assign_speakers_to_segments(segments, mapped_diarization)
+                                logger.info(f"[{websocket.remote_address}] Diarization + enrollment completed: {len(mapped_diarization)} speaker segments")
+                            elif speaker_id >= 0:
+                                # No diarization - assign single speaker
+                                speaker_label = f"SPEAKER_{speaker_id:02d}"
+                                for segment in segments:
+                                    segment["speaker"] = speaker_label
+                                logger.info(f"[{websocket.remote_address}] Speaker identified via enrollment: {speaker_label} (similarity: {similarity:.3f})")
+                        except Exception as e:
+                            logger.warning(f"[{websocket.remote_address}] Enrollment failed: {e}", exc_info=True)
+                            enrollment = None
+                    
+                    # Fallback to pyannote diarization only
+                    if enrollment is None and diarization_segments:
+                        try:
                             adjusted_diarization = []
                             for diar_seg in diarization_segments:
                                 adjusted_diarization.append({
@@ -523,15 +793,12 @@ async def process_transcription_time_based(websocket, audio_queue):
                                     "end": diar_seg["end"] + absolute_time_offset,
                                     "speaker": diar_seg["speaker"]
                                 })
-                            
-                            # Map speakers consistently across segments
                             mapped_diarization, speaker_map, speaker_history, next_speaker_id = map_speakers_consistently(
                                 adjusted_diarization, speaker_map, speaker_history, absolute_time_offset, next_speaker_id
                             )
-                            
                             segments = assign_speakers_to_segments(segments, mapped_diarization)
-                    except Exception as e:
-                        logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
+                        except Exception as e:
+                            logger.warning(f"[{websocket.remote_address}] Diarization failed: {e}", exc_info=True)
 
                 # Send each segment with timestamps (and speaker if available)
                 for segment in segments:
@@ -562,14 +829,14 @@ async def process_transcription_time_based(websocket, audio_queue):
             break
 
 
-async def process_transcription_for_client(websocket, audio_queue):
+async def process_transcription_for_client(websocket, audio_queue, enrollment=None):
     """
     Routes to VAD-based or time-based transcription based on configuration.
     """
     if USE_VAD and is_vad_loaded():
-        await process_transcription_with_vad(websocket, audio_queue)
+        await process_transcription_with_vad(websocket, audio_queue, enrollment)
     else:
-        await process_transcription_time_based(websocket, audio_queue)
+        await process_transcription_time_based(websocket, audio_queue, enrollment)
 
 
 async def websocket_handler(websocket):
@@ -579,9 +846,19 @@ async def websocket_handler(websocket):
         return
 
     clients.add(websocket)
+    
+    # Initialize speaker enrollment for this connection
+    enrollment = None
+    if USE_DIARIZATION:
+        if embedding_loaded:
+            enrollment = SpeakerEnrollment()  # Uses config values
+            speaker_enrollments[websocket] = enrollment
+            logger.info(f"[{websocket.remote_address}] Speaker enrollment initialized (embedding model available, threshold: {enrollment.similarity_threshold:.2f})")
+        else:
+            logger.info(f"[{websocket.remote_address}] Speaker enrollment disabled (embedding model not loaded)")
 
     audio_queue = asyncio.Queue()
-    processor_task = asyncio.create_task(process_transcription_for_client(websocket, audio_queue))
+    processor_task = asyncio.create_task(process_transcription_for_client(websocket, audio_queue, enrollment))
 
     try:
         async for message in websocket:
@@ -599,6 +876,11 @@ async def websocket_handler(websocket):
         await audio_queue.put(None)
         await processor_task
 
+        # Clean up enrollment
+        if websocket in speaker_enrollments:
+            del speaker_enrollments[websocket]
+            logger.info(f"[{websocket.remote_address}] Speaker enrollment cleaned up")
+        
         clients.remove(websocket)
 
 

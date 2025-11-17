@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """faster-whisper model loading and transcription logic."""
 
 import numpy as np
@@ -82,19 +83,92 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
         logger.error("Transcription called but model is not loaded.")
         return []
     try:
+        # Normalize audio to improve detection of soft/unclear voices
+        # This amplifies quiet audio while preventing clipping
+        # Use float64 for normalization calculations to reduce rounding errors
+        audio_float64 = audio_data_float32.astype(np.float64)
+        audio_max = np.max(np.abs(audio_float64))
+        if audio_max > 0:
+            # Normalize to 0.95 to leave headroom and boost soft voices
+            # Calculate in float64 for precision, then convert back to float32
+            audio_normalized = (audio_float64 * (0.95 / audio_max)).astype(np.float32)
+        else:
+            audio_normalized = audio_data_float32
+        
         # faster-whisper returns segments generator
+        # Parameters balanced to reject uncertain/weird predictions while allowing legitimate speech:
+        # - temperature=0.0: Reduces randomness and hallucinations
+        # - condition_on_previous_text=False: Prevents repetitive phrases
+        # - no_speech_threshold=0.4: Balanced threshold to filter uncertain segments but allow speech
+        # - log_prob_threshold=-0.7: Balanced threshold to reject uncertain predictions but allow normal speech
+        # - suppress_blank=True: Suppresses blank outputs
+        # Use auto language detection if LANGUAGE is not set
+        # This helps avoid misinterpreting words (e.g., "Modder" -> "moeder" when forced to Dutch)
+        detected_language = LANGUAGE if LANGUAGE else None
+        
         segments, info = whisper_model.transcribe(
-            audio_data_float32,
-            beam_size=5,  # Higher beam size for better accuracy
-            language=LANGUAGE if LANGUAGE else None,
+            audio_normalized,
+            beam_size=10,  # Increased beam size for better articulation accuracy (helps distinguish similar words like "Modder" vs "moeder")
+            best_of=5,  # Try multiple candidates and pick the best (helps with articulation accuracy)
+            language=detected_language,  # None = auto-detect, otherwise use specified language
             vad_filter=False,  # We handle VAD separately
-            vad_parameters=None
+            vad_parameters=None,
+            temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),  # Temperature fallback: try multiple temperatures for better accuracy
+            condition_on_previous_text=True,  # Use context from previous text for better articulation
+            no_speech_threshold=0.4,  # Balanced threshold to filter uncertain segments but allow speech (0.0-1.0, higher = stricter)
+            log_prob_threshold=-0.7,  # Balanced threshold to reject uncertain predictions but allow normal speech
+            compression_ratio_threshold=2.4,  # Detect repetitive/hallucinated text (lower = stricter)
+            suppress_blank=True,  # Suppress blank outputs
+            initial_prompt=None,  # Don't bias towards any specific phrases
+            word_timestamps=True,  # Enable word-level timestamps for better accuracy
         )
+        
+        # Log detected language for debugging
+        if detected_language is None and hasattr(info, 'language'):
+            logger.debug(f"Auto-detected language: {info.language} (probability: {getattr(info, 'language_probability', 'N/A')})")
         # Extract segments with timestamps
+        # Filter out very short segments and low-confidence segments that are likely noise
         result = []
         for segment in segments:
+            text = segment.text.strip()
+            
+            # Skip empty segments
+            if not text:
+                continue
+            
+            # Skip very short segments (< 0.25 seconds) that are likely noise or uncertain predictions
+            segment_duration = segment.end - segment.start
+            if segment_duration < 0.25:
+                logger.debug(f"Filtered short segment (likely noise/uncertain): '{text}' ({segment_duration:.2f}s)")
+                continue
+            
+            # Skip segments with low average log probability (likely noise/hallucination/uncertain predictions)
+            # Balanced threshold to reject uncertain/weird outputs while allowing legitimate speech
+            if hasattr(segment, 'avg_logprob') and segment.avg_logprob < -1.0:
+                logger.debug(f"Filtered low-confidence segment (uncertain/weird): '{text}' (logprob: {segment.avg_logprob:.2f})")
+                continue
+            
+            # Filter out repetitive/hallucinated text (e.g., "I'm sorry" repeated many times)
+            # Check if text contains the same phrase repeated many times
+            words = text.split()
+            if len(words) >= 6:  # Need at least 6 words to detect repetition
+                # Check for repetitive phrases - look for patterns where the same 2-word phrase repeats
+                # This catches cases like "I'm sorry, I'm sorry, I'm sorry..."
+                first_phrase = ' '.join(words[:2]).lower()
+                phrase_count = 1
+                for i in range(2, len(words) - 1, 2):
+                    phrase = ' '.join(words[i:i+2]).lower()
+                    if phrase == first_phrase:
+                        phrase_count += 1
+                    else:
+                        break
+                # If the same 2-word phrase appears 3+ times consecutively, it's likely a hallucination
+                if phrase_count >= 3:
+                    logger.debug(f"Filtered repetitive segment (hallucination): '{text[:80]}...' (phrase '{first_phrase}' repeated {phrase_count} times)")
+                    continue
+            
             result.append({
-                "text": segment.text.strip(),
+                "text": text,
                 "start": segment.start + time_offset,
                 "end": segment.end + time_offset
             })

@@ -41,23 +41,30 @@ services:
       - CUDNN_LOGDEST_DBG=/dev/null
       
       # Model Configuration
-      - MODEL_NAME=${MODEL_NAME:-large}  # Options: tiny, base, small, medium, large, large-v2, large-v3
+      - MODEL_NAME=${MODEL_NAME:-large} # Options: tiny, base, small, medium, large, large-v2, large-v3
       - MODEL_PATH=${MODEL_PATH:-.}
-      - LANGUAGE=${LANGUAGE:-en}  # Set to 'en' for English, or override with language code (e.g., es, fr, nl)
+      - LANGUAGE=${LANGUAGE:-} # Set to language code (e.g., en, nl, es, fr) or leave empty for auto-detection
       - PROCESSING_THREADS=${PROCESSING_THREADS:-12}  # Optimized for i9-9900K (12 threads allocated)
       
       # VAD (Voice Activity Detection) Configuration
       - USE_VAD=${USE_VAD:-true}  # Enable/disable VAD
-      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.5}  # Speech detection threshold (0.0-1.0)
+      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.3}  # Speech detection threshold (0.0-1.0, lower = more sensitive to soft voices)
       - VAD_MIN_SILENCE_MS=${VAD_MIN_SILENCE_MS:-500}  # Minimum silence duration to detect end of utterance
-      - VAD_SPEECH_PAD_MS=${VAD_SPEECH_PAD_MS:-100}  # Padding around speech segments
+      - VAD_SPEECH_PAD_MS=${VAD_SPEECH_PAD_MS:-200}  # Padding around speech segments (increased for soft voices)
       - VAD_MAX_SPEECH_MS=${VAD_MAX_SPEECH_MS:-5000}  # Maximum speech duration before forcing transcription
       
       # Speaker Diarization Configuration
       - USE_DIARIZATION=${USE_DIARIZATION:-true}  # Enable/disable speaker diarization
       - HF_TOKEN=  # HuggingFace token for accessing private models (optional)
       - HUGGING_FACE_HUB_TOKEN=  # Alternative token variable
-      
+
+      # Speaker Enrollment Configuration (Voice Print System)
+      - ENROLLMENT_SIMILARITY_THRESHOLD=${ENROLLMENT_SIMILARITY_THRESHOLD:-0.75}  # Cosine similarity threshold (0.0-1.0, higher = stricter matching)
+      - ENROLLMENT_MIN_SEGMENT_DURATION=${ENROLLMENT_MIN_SEGMENT_DURATION:-0.4}  # Minimum segment duration in seconds for reliable embedding (0.3-1.0)
+      - ENROLLMENT_LEARNING_RATE=${ENROLLMENT_LEARNING_RATE:-0.25}  # Learning rate for voiceprint updates (0.1-0.5, lower = more stable)
+      - ENROLLMENT_MIN_CONFIDENCE=${ENROLLMENT_MIN_CONFIDENCE:-0.65}  # Minimum confidence to enroll new speaker (prevents noise enrollment, 0.5-0.8)
+      - ENROLLMENT_ADAPTIVE_THRESHOLD=${ENROLLMENT_ADAPTIVE_THRESHOLD:-true}  # Adjust threshold based on number of speakers (true/false)
+
       # Audio Processing Configuration
       - MAX_SEGMENT_SECONDS=${MAX_SEGMENT_SECONDS:-3600.0}  # Maximum segment size in seconds (60 minutes default)
     

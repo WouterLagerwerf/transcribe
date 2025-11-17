@@ -12,6 +12,7 @@ from app.utils.logger import logger
 from app.services.transcription import load_model, get_executor
 from app.services.vad import load_vad_model
 from app.services.diarization import load_diarization_model
+from app.services.speaker_enrollment import load_embedding_model
 from app.handlers.health_check import start_http_server
 from app.handlers.websocket_handler import websocket_handler
 
@@ -53,6 +54,14 @@ async def main():
             await loop.run_in_executor(executor, load_diarization_model)
         except Exception as e:
             logger.warning(f"Diarization loading failed: {e}. Continuing without diarization.")
+    
+    # Load speaker embedding model for enrollment (non-blocking)
+    if USE_DIARIZATION:
+        logger.info("Loading speaker embedding model for enrollment...")
+        try:
+            await loop.run_in_executor(executor, load_embedding_model)
+        except Exception as e:
+            logger.warning(f"Embedding model loading failed: {e}. Speaker enrollment disabled.")
     
     # Print summary after all models loaded
     print("", file=sys.stderr)
