@@ -53,15 +53,22 @@ def download_silero_vad():
     
     import torch
     
+    # Ensure torch hub uses the correct cache directory
+    torch.hub.set_dir('/root/.cache/torch/hub')
+    
     # Download Silero VAD model - this is what faster-whisper uses internally
     try:
-        torch.hub.load(
+        # Force reload to ensure we get the latest and cache it properly
+        model, utils = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
-            force_reload=False,
+            force_reload=True,
             trust_repo=True
         )
-        print("✅ Silero VAD model downloaded")
+        # Verify it loaded
+        if model is not None:
+            print("✅ Silero VAD model downloaded and cached")
+        del model, utils
     except Exception as e:
         print(f"⚠️  Failed to download Silero VAD: {e}")
         print("   faster-whisper will download it on first use")
@@ -96,20 +103,22 @@ def download_speaker_embedding_model():
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
         logging.getLogger("lightning_fabric").setLevel(logging.ERROR)
         
-        from pyannote.audio import Model
+        from pyannote.audio import Inference
         
-        # Load model to cache it
-        embedding_model = Model.from_pretrained(
-            "pyannote/embedding",
-            token=HF_TOKEN
-        )
+        # Initialize Inference directly (this downloads and caches the model)
+        try:
+            inference = Inference(
+                "pyannote/embedding",
+                window="whole",
+                use_auth_token=HF_TOKEN
+            )
+        except TypeError:
+            inference = Inference("pyannote/embedding", window="whole")
         
         # Verify it loaded correctly
-        if embedding_model is not None:
-            # Run a quick test to make sure it's cached properly
-            embedding_model.eval()
+        if inference is not None:
             print("✅ Speaker embedding model downloaded and verified")
-            del embedding_model
+            del inference
             return True
         else:
             print("⚠️  Model loaded as None - may need to re-download at runtime")

@@ -14,8 +14,10 @@ RUN apt-get update && apt-get install -y \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3
 
-# Set CUDA paths
+# Set CUDA and cache paths
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+ENV TORCH_HOME=/root/.cache/torch
+ENV HF_HOME=/root/.cache/huggingface
 
 WORKDIR /app
 

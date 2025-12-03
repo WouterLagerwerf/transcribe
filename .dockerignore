@@ -1,0 +1,56 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# IDE
+.idea
+.vscode
+.cursor
+*.swp
+*.swo
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+.eggs
+dist
+build
+*.egg
+
+# Environment
+.env
+.env.*
+!.env.example
+venv
+.venv
+env
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# UI (built separately)
+ui-interface
+
+# Testing
+tests
+*.test.py
+.pytest_cache
+.coverage
+htmlcov
+
+# Misc
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+

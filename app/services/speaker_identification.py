@@ -55,7 +55,7 @@ def load_speaker_model():
         return True
     
     try:
-        from pyannote.audio import Model, Inference
+        from pyannote.audio import Inference
         from app.config.settings import HF_TOKEN
         
         logger.info("Loading speaker embedding model...")
@@ -65,23 +65,22 @@ def load_speaker_model():
             os.environ['HF_TOKEN'] = HF_TOKEN
             os.environ['HUGGING_FACE_HUB_TOKEN'] = HF_TOKEN
         
-        # Load the embedding model
+        # Initialize Inference directly with model name (recommended approach)
+        # This handles model loading and configuration internally
         try:
-            model = Model.from_pretrained(
+            embedding_inference = Inference(
                 "pyannote/embedding",
-                token=HF_TOKEN
+                window="whole",
+                use_auth_token=HF_TOKEN
             )
         except TypeError:
-            try:
-                model = Model.from_pretrained(
-                    "pyannote/embedding",
-                    use_auth_token=HF_TOKEN
-                )
-            except TypeError:
-                model = Model.from_pretrained("pyannote/embedding")
+            # Fallback for newer versions that use 'token' parameter
+            embedding_inference = Inference(
+                "pyannote/embedding", 
+                window="whole"
+            )
         
-        # Wrap model with Inference for proper embedding extraction
-        embedding_inference = Inference(model, window="whole")
+        # Move to device
         embedding_inference.to(torch.device(TORCH_DEVICE))
         embedding_model_loaded = True
         
@@ -130,7 +129,8 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
     
     try:
         # Prepare waveform: [channels, samples] format for pyannote
-        waveform = torch.from_numpy(audio_float32).unsqueeze(0).float()
+        # Must be on the same device as the model
+        waveform = torch.from_numpy(audio_float32).unsqueeze(0).float().to(TORCH_DEVICE)
         
         # Create input dict for Inference
         audio_input = {
@@ -139,7 +139,8 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
         }
         
         # Extract embedding using Inference (handles all internal processing)
-        embedding = embedding_inference(audio_input)
+        with torch.no_grad():
+            embedding = embedding_inference(audio_input)
         
         # Convert to numpy if needed
         if isinstance(embedding, torch.Tensor):
