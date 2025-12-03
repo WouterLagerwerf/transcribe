@@ -93,6 +93,11 @@ async def transcribe_handler(request: Request):
             speaker_count = identifier.get_speaker_count()
             logger.info(f"Speaker identification completed: {speaker_count} speakers identified")
         
+        # Convert numpy types to Python types for JSON serialization
+        for seg in segments:
+            seg["start"] = float(seg["start"])
+            seg["end"] = float(seg["end"])
+        
         # Return segments with timestamps (and speaker info if identification was performed)
         return web.json_response({
             "segments": segments,

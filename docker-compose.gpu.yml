@@ -1,0 +1,40 @@
+# =============================================================================
+# GPU OVERRIDE FOR NVIDIA SYSTEMS
+# =============================================================================
+# Use this with the base docker-compose.yml to enable GPU acceleration:
+#
+#   docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Requirements:
+#   - NVIDIA GPU
+#   - NVIDIA Container Toolkit installed
+#   - Linux (NVIDIA Docker doesn't work on Mac/Windows)
+# =============================================================================
+
+services:
+  transcription-server:
+    deploy:
+      resources:
+        limits:
+          cpus: '12'
+          memory: 24G
+        reservations:
+          cpus: '8'
+          memory: 20G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    environment:
+      # Override to GPU mode
+      - DEVICE=cuda
+      - COMPUTE_TYPE=float16  # float16 is optimal for NVIDIA GPUs
+      - PROCESSING_THREADS=12
+      # Suppress cuDNN warnings
+      - CUDNN_LOGINFO_DBG=0
+      - CUDNN_LOGDEST_DBG=/dev/null
+    
+    healthcheck:
+      start_period: 60s  # GPU loads models faster
+

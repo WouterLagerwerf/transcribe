@@ -14,6 +14,18 @@ Key features:
 - Speaker confirmation (requires consistent matches before assignment)
 """
 
+import os
+import warnings
+import logging
+
+# Suppress PyTorch Lightning warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*weights_only=False.*")
+warnings.filterwarnings("ignore", message=".*ModelCheckpoint.*")
+warnings.filterwarnings("ignore", message=".*task-dependent loss.*")
+logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+logging.getLogger("lightning_fabric").setLevel(logging.ERROR)
+
 import numpy as np
 import torch
 from typing import Dict, List, Tuple, Optional
@@ -23,7 +35,6 @@ from app.utils.logger import logger
 from app.config.settings import TORCH_DEVICE, SAMPLE_RATE
 
 # Configuration defaults (can be overridden via environment)
-import os
 MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.5"))  # Minimum seconds for reliable embedding
 SIMILARITY_THRESHOLD = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.70"))  # Cosine similarity threshold
 ENROLLMENT_THRESHOLD = float(os.getenv("SPEAKER_ENROLLMENT_THRESHOLD", "0.65"))  # Threshold for new speaker enrollment
@@ -32,19 +43,19 @@ VOICEPRINT_MEMORY = int(os.getenv("SPEAKER_VOICEPRINT_MEMORY", "20"))  # Number 
 LEARNING_RATE = float(os.getenv("SPEAKER_LEARNING_RATE", "0.15"))  # How fast voiceprints adapt
 
 # Global state
-embedding_model = None
+embedding_inference = None
 embedding_model_loaded = False
 
 
 def load_speaker_model():
     """Load the speaker embedding model from pyannote."""
-    global embedding_model, embedding_model_loaded
+    global embedding_inference, embedding_model_loaded
     
     if embedding_model_loaded:
         return True
     
     try:
-        from pyannote.audio import Model
+        from pyannote.audio import Model, Inference
         from app.config.settings import HF_TOKEN
         
         logger.info("Loading speaker embedding model...")
@@ -56,21 +67,22 @@ def load_speaker_model():
         
         # Load the embedding model
         try:
-            embedding_model = Model.from_pretrained(
+            model = Model.from_pretrained(
                 "pyannote/embedding",
                 token=HF_TOKEN
             )
         except TypeError:
             try:
-                embedding_model = Model.from_pretrained(
+                model = Model.from_pretrained(
                     "pyannote/embedding",
                     use_auth_token=HF_TOKEN
                 )
             except TypeError:
-                embedding_model = Model.from_pretrained("pyannote/embedding")
+                model = Model.from_pretrained("pyannote/embedding")
         
-        embedding_model.to(TORCH_DEVICE)
-        embedding_model.eval()
+        # Wrap model with Inference for proper embedding extraction
+        embedding_inference = Inference(model, window="whole")
+        embedding_inference.to(torch.device(TORCH_DEVICE))
         embedding_model_loaded = True
         
         import sys
@@ -107,7 +119,7 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
     Returns:
         Normalized embedding vector (numpy array) or None if extraction fails
     """
-    if embedding_model is None or not embedding_model_loaded:
+    if embedding_inference is None or not embedding_model_loaded:
         return None
     
     # Check minimum duration
@@ -117,49 +129,30 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
         return None
     
     try:
-        # Convert to torch tensor: [1, samples] for single channel
-        audio_tensor = torch.from_numpy(audio_float32).unsqueeze(0).to(TORCH_DEVICE)
+        # Prepare waveform: [channels, samples] format for pyannote
+        waveform = torch.from_numpy(audio_float32).unsqueeze(0).float()
         
-        with torch.no_grad():
-            # Try dict input first (newer pyannote versions)
-            try:
-                result = embedding_model({
-                    'waveform': audio_tensor,
-                    'sample_rate': SAMPLE_RATE
-                })
-            except (TypeError, AttributeError):
-                # Fallback to direct tensor input
-                result = embedding_model(audio_tensor, SAMPLE_RATE)
-            
-            # Extract embedding from result
-            if isinstance(result, dict):
-                embedding = result.get('embedding', result.get('embeddings', None))
-            else:
-                embedding = result
-            
-            if embedding is None:
-                return None
-            
-            # Convert to numpy
-            if isinstance(embedding, torch.Tensor):
-                embedding = embedding.cpu().numpy()
-            
-            # Handle batch dimension
-            if len(embedding.shape) > 1:
-                if embedding.shape[0] == 1:
-                    embedding = embedding[0]
-                else:
-                    # Average across batch
-                    embedding = embedding.mean(axis=0)
-            
-            # Flatten and normalize to unit vector
-            embedding = embedding.flatten()
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
-                return embedding
-            
-            return None
+        # Create input dict for Inference
+        audio_input = {
+            "waveform": waveform,
+            "sample_rate": SAMPLE_RATE
+        }
+        
+        # Extract embedding using Inference (handles all internal processing)
+        embedding = embedding_inference(audio_input)
+        
+        # Convert to numpy if needed
+        if isinstance(embedding, torch.Tensor):
+            embedding = embedding.cpu().numpy()
+        
+        # Flatten and normalize to unit vector
+        embedding = embedding.flatten()
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+            return embedding
+        
+        return None
             
     except Exception as e:
         logger.error(f"Error extracting speaker embedding: {e}", exc_info=True)

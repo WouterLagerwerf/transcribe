@@ -64,13 +64,13 @@ VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))  # Minimum sile
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "200"))  # Padding around speech segments
 
 # faster-whisper configuration
-# Auto-select compute type based on device: float16 for GPU, int8 for CPU (unless overridden)
+# Auto-select compute type based on device (unless overridden)
 _compute_type_override = os.getenv("COMPUTE_TYPE", None)
 if _compute_type_override:
     COMPUTE_TYPE = _compute_type_override  # "int8", "float16", "float32", "int8_float16"
 else:
-    # Default: float16 for GPU (best performance), int8 for CPU (best performance)
-    COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
+    # Default: float16 for both GPU and CPU
+    COMPUTE_TYPE = "float16"
 
 # Transcription parameters (tunable for latency vs accuracy trade-off)
 BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))  # Beam size for decoding (higher = more accurate, slower)

@@ -3,12 +3,15 @@
 # =============================================================================
 # Models are pre-downloaded during docker build for faster startup.
 #
-# QUICK START:
-#   1. Build the image (downloads models during build):
+# QUICK START (CPU - works on Mac/Linux/Windows):
+#   1. Build the image:
 #      docker-compose build
 #
 #   2. Start the server:
 #      docker-compose up -d
+#
+# WITH NVIDIA GPU (Linux only):
+#   docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 #
 # WITH SPEAKER IDENTIFICATION (requires HuggingFace token):
 #   1. Get a token from: https://huggingface.co/settings/tokens
@@ -22,6 +25,10 @@
 # TO CHANGE THE WHISPER MODEL:
 #   MODEL_NAME=medium docker-compose build
 #   (Options: tiny, base, small, medium, large, large-v2, large-v3)
+#
+# FOR FASTER STARTUP ON MAC (use smaller model):
+#   MODEL_NAME=base docker-compose build
+#   docker-compose up -d
 # =============================================================================
 
 services:
@@ -30,98 +37,79 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Model to pre-download during build (saves startup time)
         MODEL_NAME: ${MODEL_NAME:-large-v3}
-        # HuggingFace token for pyannote models (optional - set in .env file)
         HF_TOKEN: ${HF_TOKEN:-}
     container_name: transcription-server
     restart: unless-stopped
     
-    # Resource allocation optimized for i9-9900K (8 cores, 16 threads) + RTX 3070
+    # Resource allocation for CPU
     deploy:
       resources:
-        # CPU allocation: Use 12 threads (leaving 4 for system/Docker overhead)
         limits:
-          cpus: '12'
-          memory: 24G  # 24GB allocated (32GB total system - 8GB reserved for system)
+          cpus: '8'
+          memory: 16G
         reservations:
-          cpus: '8'  # Guaranteed minimum CPU
-          memory: 20G  # Guaranteed minimum RAM (increased for better performance)
-          devices:
-            - driver: nvidia
-              count: 1  # RTX 3070 (8GB VRAM)
-              capabilities: [gpu]
+          cpus: '4'
+          memory: 8G
     
-    # Port mappings
     ports:
-      - "${HEALTH_CHECK_PORT:-8080}:8080"  # HTTP API (health check + transcription)
-      - "${WEBSOCKET_PORT:-8765}:8765"     # WebSocket server
+      - "${HEALTH_CHECK_PORT:-8080}:8080"
+      - "${WEBSOCKET_PORT:-8765}:8765"
     
-    # Environment variables
     environment:
       # Server Configuration
       - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
       - HEALTH_CHECK_PORT=${HEALTH_CHECK_PORT:-8080}
       - WEBSOCKET_PORT=${WEBSOCKET_PORT:-8765}
       
-      # Device Configuration xGPU-optimized for RTX 3070)
-      - DEVICE=cuda  # Force CUDA for GPU acceleration
-      - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}  # float16 is optimal for RTX 3070 (good performance/accuracy balance)
-      # Suppress cuDNN warnings (transcription works fine without cuDNN 9)
-      - CUDNN_LOGINFO_DBG=0
-      - CUDNN_LOGDEST_DBG=/dev/null
+      # Device Configuration (CPU mode - auto-detect will use CPU on Mac)
+      - DEVICE=${DEVICE:-cpu}
+      - COMPUTE_TYPE=${COMPUTE_TYPE:-int8}  # int8 is fastest on CPU
       
-      # Model Configuration (should match build args for pre-downloaded models)
-      - MODEL_NAME=${MODEL_NAME:-large-v3}  # Options: tiny, base, small, medium, large, large-v2, large-v3
-      - MODEL_PATH=/app/models  # Pre-downloaded during docker build
-      - LANGUAGE=${LANGUAGE:-} # Set to language code (e.g., en, nl, es, fr) or leave empty for auto-detection
-      - PROCESSING_THREADS=${PROCESSING_THREADS:-12}  # Optimized for i9-9900K (12 threads allocated)
+      # Model Configuration
+      - MODEL_NAME=${MODEL_NAME:-large-v3}
+      - MODEL_PATH=/app/models
+      - LANGUAGE=${LANGUAGE:-}
+      - PROCESSING_THREADS=${PROCESSING_THREADS:-8}
       
-      # VAD Configuration (uses faster-whisper's built-in Silero VAD)
-      - VAD_MIN_SILENCE_MS=${VAD_MIN_SILENCE_MS:-500}  # Minimum silence to detect end of speech
-      - VAD_SPEECH_PAD_MS=${VAD_SPEECH_PAD_MS:-200}  # Padding around speech segments
+      # VAD Configuration
+      - VAD_MIN_SILENCE_MS=${VAD_MIN_SILENCE_MS:-500}
+      - VAD_SPEECH_PAD_MS=${VAD_SPEECH_PAD_MS:-200}
       
       # Transcription Performance
-      - BEAM_SIZE=${BEAM_SIZE:-5}  # Beam size for decoding (higher = more accurate but slower)
-      - BEST_OF=${BEST_OF:-1}  # Number of candidates (higher = more accurate but slower)
+      - BEAM_SIZE=${BEAM_SIZE:-5}
+      - BEST_OF=${BEST_OF:-1}
       
-      # Speaker Identification Configuration
-      - USE_DIARIZATION=${USE_DIARIZATION:-true}  # Enable/disable speaker identification
-      - HF_TOKEN=${HF_TOKEN:-}  # HuggingFace token for pyannote models (set in .env file)
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}  # Alternative token variable
+      # Speaker Identification
+      - USE_DIARIZATION=${USE_DIARIZATION:-true}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
 
-      # Speaker Identification Tuning (Embedding-based)
-      - SPEAKER_SIMILARITY_THRESHOLD=${SPEAKER_SIMILARITY_THRESHOLD:-0.70}  # Cosine similarity threshold (0.0-1.0, higher = stricter)
-      - SPEAKER_ENROLLMENT_THRESHOLD=${SPEAKER_ENROLLMENT_THRESHOLD:-0.65}  # Below this creates new speaker (0.5-0.7)
-      - SPEAKER_MIN_SEGMENT_DURATION=${SPEAKER_MIN_SEGMENT_DURATION:-0.5}  # Minimum segment duration for embedding (seconds)
-      - SPEAKER_CONFIRMATION_COUNT=${SPEAKER_CONFIRMATION_COUNT:-2}  # Matches needed before confirming speaker
-      - SPEAKER_VOICEPRINT_MEMORY=${SPEAKER_VOICEPRINT_MEMORY:-20}  # Embeddings to remember per speaker
-      - SPEAKER_LEARNING_RATE=${SPEAKER_LEARNING_RATE:-0.15}  # How fast voiceprints adapt (0.1-0.3)
+      # Speaker Identification Tuning
+      - SPEAKER_SIMILARITY_THRESHOLD=${SPEAKER_SIMILARITY_THRESHOLD:-0.70}
+      - SPEAKER_ENROLLMENT_THRESHOLD=${SPEAKER_ENROLLMENT_THRESHOLD:-0.65}
+      - SPEAKER_MIN_SEGMENT_DURATION=${SPEAKER_MIN_SEGMENT_DURATION:-0.5}
+      - SPEAKER_CONFIRMATION_COUNT=${SPEAKER_CONFIRMATION_COUNT:-2}
+      - SPEAKER_VOICEPRINT_MEMORY=${SPEAKER_VOICEPRINT_MEMORY:-20}
+      - SPEAKER_LEARNING_RATE=${SPEAKER_LEARNING_RATE:-0.15}
 
-      # Audio Processing Configuration
-      - MAX_SEGMENT_SECONDS=${MAX_SEGMENT_SECONDS:-3600.0}  # Maximum segment size in seconds (60 minutes default)
+      # Audio Processing
+      - MAX_SEGMENT_SECONDS=${MAX_SEGMENT_SECONDS:-3600.0}
     
-    # Shared memory for PyTorch (important for model loading and inference)
     shm_size: '2gb'
     
-    # Volume mounts for model caching
-    # Models are pre-downloaded in the image, but volumes allow:
-    # - Sharing cache with host (faster rebuilds)
-    # - Persisting any runtime model updates
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface:rw
       - ~/.cache/torch:/root/.cache/torch:rw
       - transcription-models:/app/models
     
-    # Health check
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s  # Reduced: models are pre-downloaded during build
+      start_period: 180s  # CPU takes longer to load large-v3 model
     
-    # Logging
     logging:
       driver: "json-file"
       options:
@@ -131,4 +119,3 @@ services:
 volumes:
   transcription-models:
     driver: local
-

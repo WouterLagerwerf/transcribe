@@ -11,14 +11,14 @@ import websockets
 # Use orjson for faster JSON serialization (3-10x faster than stdlib json)
 try:
     import orjson
-    def json_dumps(obj: Any) -> bytes:
-        """Fast JSON serialization using orjson."""
-        return orjson.dumps(obj)
+    def json_dumps(obj: Any) -> str:
+        """Fast JSON serialization using orjson, returns string for WebSocket text messages."""
+        return orjson.dumps(obj).decode('utf-8')
 except ImportError:
     import json
-    def json_dumps(obj: Any) -> bytes:
+    def json_dumps(obj: Any) -> str:
         """Fallback to stdlib json if orjson not available."""
-        return json.dumps(obj).encode('utf-8')
+        return json.dumps(obj)
 
 from app.config.settings import (
     SAMPLE_RATE, CHUNK_SIZE_SECONDS, MAX_SEGMENT_SECONDS, USE_DIARIZATION
@@ -234,14 +234,18 @@ async def process_transcription(session: Session):
 
 async def send_transcript(session: Session, segment: Dict, is_final: bool = True):
     """Send a transcript segment over the websocket."""
+    # Convert numpy types to Python types for JSON serialization
+    start_time = float(segment["start"])
+    end_time = float(segment["end"])
+    
     speaker_info = f" [{segment.get('speaker', 'UNKNOWN')}]" if segment.get('speaker') else ""
-    logger.info(f"{session.log_prefix} Transcript: {segment['text']}{speaker_info} [{segment['start']:.2f}s - {segment['end']:.2f}s]")
+    logger.info(f"{session.log_prefix} Transcript: {segment['text']}{speaker_info} [{start_time:.2f}s - {end_time:.2f}s]")
     
     response_data = {
-        "session_id": session.session_id,  # Include session ID in response
+        "session_id": session.session_id,
         "transcript": segment["text"],
-        "start": segment["start"],
-        "end": segment["end"],
+        "start": start_time,
+        "end": end_time,
         "is_final": is_final
     }
     if segment.get("speaker"):
