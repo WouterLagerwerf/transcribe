@@ -38,6 +38,10 @@ services:
       dockerfile: Dockerfile
       args:
         MODEL_NAME: ${MODEL_NAME:-large-v3}
+    # Uncomment for development - mount code without rebuilding:
+    # volumes:
+    #   - ./app:/app/app:ro
+    #   - ./server.py:/app/server.py:ro
         HF_TOKEN: ${HF_TOKEN:-}
     container_name: transcription-server
     restart: unless-stopped
@@ -86,10 +90,11 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
 
       # Speaker Identification Tuning
-      - SPEAKER_SIMILARITY_THRESHOLD=${SPEAKER_SIMILARITY_THRESHOLD:-0.70}
-      - SPEAKER_ENROLLMENT_THRESHOLD=${SPEAKER_ENROLLMENT_THRESHOLD:-0.65}
-      - SPEAKER_MIN_SEGMENT_DURATION=${SPEAKER_MIN_SEGMENT_DURATION:-0.5}
-      - SPEAKER_CONFIRMATION_COUNT=${SPEAKER_CONFIRMATION_COUNT:-2}
+      # Tuned for pyannote embedding model (produces lower similarities ~0.4-0.6)
+      - SPEAKER_SIMILARITY_THRESHOLD=${SPEAKER_SIMILARITY_THRESHOLD:-0.40}
+      - SPEAKER_ENROLLMENT_THRESHOLD=${SPEAKER_ENROLLMENT_THRESHOLD:-0.30}
+      - SPEAKER_MIN_SEGMENT_DURATION=${SPEAKER_MIN_SEGMENT_DURATION:-0.3}
+      - SPEAKER_CONFIRMATION_COUNT=${SPEAKER_CONFIRMATION_COUNT:-1}
       - SPEAKER_VOICEPRINT_MEMORY=${SPEAKER_VOICEPRINT_MEMORY:-20}
       - SPEAKER_LEARNING_RATE=${SPEAKER_LEARNING_RATE:-0.15}
 

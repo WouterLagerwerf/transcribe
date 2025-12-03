@@ -116,7 +116,12 @@ async def identify_speaker_for_segment(
     Returns:
         Speaker label (e.g., "SPEAKER_00") or None
     """
-    if session.speaker_identifier is None or not is_speaker_model_loaded():
+    if session.speaker_identifier is None:
+        logger.debug(f"{session.log_prefix} No speaker identifier for session")
+        return None
+    
+    if not is_speaker_model_loaded():
+        logger.warning(f"{session.log_prefix} Speaker model not loaded")
         return None
     
     try:
@@ -129,11 +134,13 @@ async def identify_speaker_for_segment(
         
         if speaker_label:
             logger.debug(f"{session.log_prefix} Identified speaker: {speaker_label} (confidence: {confidence:.3f})")
+        else:
+            logger.debug(f"{session.log_prefix} identify_speaker returned None")
         
         return speaker_label
         
     except Exception as e:
-        logger.warning(f"{session.log_prefix} Speaker identification failed: {e}")
+        logger.error(f"{session.log_prefix} Speaker identification failed: {e}", exc_info=True)
         return None
 
 
@@ -175,14 +182,23 @@ async def process_transcription(session: Session):
                             seg_end = int((segment["end"] - session.absolute_time_offset) * SAMPLE_RATE)
                             seg_start = max(0, seg_start)
                             seg_end = min(len(audio_float32), seg_end)
+                            segment_duration = (seg_end - seg_start) / SAMPLE_RATE
                             
-                            if seg_end > seg_start:
+                            if seg_end > seg_start and segment_duration >= 0.3:
                                 segment_audio = audio_float32[seg_start:seg_end]
                                 speaker = await identify_speaker_for_segment(
                                     segment_audio, session, executor, loop
                                 )
                                 if speaker:
                                     segment["speaker"] = speaker
+                                elif session.speaker_identifier:
+                                    last_speaker = session.speaker_identifier.get_last_speaker_label()
+                                    if last_speaker:
+                                        segment["speaker"] = last_speaker
+                            elif session.speaker_identifier:
+                                last_speaker = session.speaker_identifier.get_last_speaker_label()
+                                if last_speaker:
+                                    segment["speaker"] = last_speaker
                             
                             session.segments_processed += 1
                             await send_transcript(session, segment, is_final=True)
@@ -212,13 +228,30 @@ async def process_transcription(session: Session):
                         seg_start = max(0, seg_start)
                         seg_end = min(len(audio_float32), seg_end)
                         
-                        if seg_end > seg_start:
+                        segment_duration = (seg_end - seg_start) / SAMPLE_RATE
+                        logger.debug(f"{session.log_prefix} Speaker ID: seg_start={seg_start}, seg_end={seg_end}, duration={segment_duration:.2f}s, chunk_len={len(audio_float32)}")
+                        
+                        if seg_end > seg_start and segment_duration >= 0.3:
                             segment_audio = audio_float32[seg_start:seg_end]
                             speaker = await identify_speaker_for_segment(
                                 segment_audio, session, executor, loop
                             )
                             if speaker:
                                 segment["speaker"] = speaker
+                            else:
+                                # Fallback to last speaker for continuity
+                                if session.speaker_identifier:
+                                    last_speaker = session.speaker_identifier.get_last_speaker_label()
+                                    if last_speaker:
+                                        segment["speaker"] = last_speaker
+                                        logger.debug(f"{session.log_prefix} Using last speaker {last_speaker} as fallback")
+                        else:
+                            # Very short segment - use last speaker
+                            if session.speaker_identifier:
+                                last_speaker = session.speaker_identifier.get_last_speaker_label()
+                                if last_speaker:
+                                    segment["speaker"] = last_speaker
+                                    logger.debug(f"{session.log_prefix} Short segment, using last speaker: {last_speaker}")
                         
                         session.segments_processed += 1
                         await send_transcript(session, segment, is_final=True)

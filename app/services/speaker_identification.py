@@ -35,27 +35,28 @@ from app.utils.logger import logger
 from app.config.settings import TORCH_DEVICE, SAMPLE_RATE
 
 # Configuration defaults (can be overridden via environment)
-MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.5"))  # Minimum seconds for reliable embedding
-SIMILARITY_THRESHOLD = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.70"))  # Cosine similarity threshold
-ENROLLMENT_THRESHOLD = float(os.getenv("SPEAKER_ENROLLMENT_THRESHOLD", "0.65"))  # Threshold for new speaker enrollment
-CONFIRMATION_COUNT = int(os.getenv("SPEAKER_CONFIRMATION_COUNT", "2"))  # Matches needed before confirming speaker
+# NOTE: pyannote embedding model produces relatively low cosine similarities (0.4-0.6 for same speaker)
+MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.3"))  # Minimum seconds for reliable embedding
+SIMILARITY_THRESHOLD = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.40"))  # Cosine similarity threshold (tuned for pyannote)
+ENROLLMENT_THRESHOLD = float(os.getenv("SPEAKER_ENROLLMENT_THRESHOLD", "0.30"))  # Below this = new speaker
+CONFIRMATION_COUNT = int(os.getenv("SPEAKER_CONFIRMATION_COUNT", "1"))  # Matches needed before confirming speaker
 VOICEPRINT_MEMORY = int(os.getenv("SPEAKER_VOICEPRINT_MEMORY", "20"))  # Number of embeddings to remember per speaker
 LEARNING_RATE = float(os.getenv("SPEAKER_LEARNING_RATE", "0.15"))  # How fast voiceprints adapt
 
 # Global state
-embedding_inference = None
+embedding_model = None
 embedding_model_loaded = False
 
 
 def load_speaker_model():
     """Load the speaker embedding model from pyannote."""
-    global embedding_inference, embedding_model_loaded
+    global embedding_model, embedding_model_loaded
     
     if embedding_model_loaded:
         return True
     
     try:
-        from pyannote.audio import Inference
+        from pyannote.audio import Model
         from app.config.settings import HF_TOKEN
         
         logger.info("Loading speaker embedding model...")
@@ -65,23 +66,18 @@ def load_speaker_model():
             os.environ['HF_TOKEN'] = HF_TOKEN
             os.environ['HUGGING_FACE_HUB_TOKEN'] = HF_TOKEN
         
-        # Initialize Inference directly with model name (recommended approach)
-        # This handles model loading and configuration internally
+        # Load the model directly (not through Inference wrapper)
         try:
-            embedding_inference = Inference(
+            embedding_model = Model.from_pretrained(
                 "pyannote/embedding",
-                window="whole",
                 use_auth_token=HF_TOKEN
             )
         except TypeError:
-            # Fallback for newer versions that use 'token' parameter
-            embedding_inference = Inference(
-                "pyannote/embedding", 
-                window="whole"
-            )
+            embedding_model = Model.from_pretrained("pyannote/embedding")
         
-        # Move to device
-        embedding_inference.to(torch.device(TORCH_DEVICE))
+        # Move to device and set to eval mode
+        embedding_model = embedding_model.to(torch.device(TORCH_DEVICE))
+        embedding_model.eval()
         embedding_model_loaded = True
         
         import sys
@@ -105,7 +101,7 @@ def load_speaker_model():
 
 def is_model_loaded() -> bool:
     """Check if the speaker embedding model is loaded."""
-    return embedding_model_loaded
+    return embedding_model_loaded and embedding_model is not None
 
 
 def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
@@ -118,7 +114,8 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
     Returns:
         Normalized embedding vector (numpy array) or None if extraction fails
     """
-    if embedding_inference is None or not embedding_model_loaded:
+    if embedding_model is None or not embedding_model_loaded:
+        logger.warning("Speaker embedding model not loaded")
         return None
     
     # Check minimum duration
@@ -127,32 +124,59 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
         logger.debug(f"Audio too short for embedding: {duration:.2f}s < {MIN_SEGMENT_DURATION}s")
         return None
     
+    # Check if audio has valid content (not silent)
+    audio_energy = np.abs(audio_float32).mean()
+    if audio_energy < 0.0001:  # Lowered threshold - allow quieter audio
+        logger.debug(f"Audio too quiet for embedding: energy={audio_energy:.6f}")
+        return None
+    
     try:
-        # Prepare waveform: [channels, samples] format for pyannote
-        # Must be on the same device as the model
-        waveform = torch.from_numpy(audio_float32).unsqueeze(0).float().to(TORCH_DEVICE)
+        # Prepare waveform for pyannote embedding model
+        waveform = torch.from_numpy(audio_float32.copy()).float().to(TORCH_DEVICE)
         
-        # Create input dict for Inference
-        audio_input = {
-            "waveform": waveform,
-            "sample_rate": SAMPLE_RATE
-        }
+        # Try (batch, channel, samples) format first - this is what SincNet expects
+        waveform_3d = waveform.unsqueeze(0).unsqueeze(0)  # [1, 1, samples]
         
-        # Extract embedding using Inference (handles all internal processing)
+        logger.info(f"Extracting embedding: duration={duration:.2f}s, shape={waveform_3d.shape}, device={waveform_3d.device}")
+        
+        # Extract embedding using Model directly  
         with torch.no_grad():
-            embedding = embedding_inference(audio_input)
+            try:
+                embedding = embedding_model(waveform_3d)
+                logger.info(f"Model output type: {type(embedding)}, shape: {embedding.shape if hasattr(embedding, 'shape') else 'N/A'}")
+            except Exception as e1:
+                logger.warning(f"3D shape failed: {e1}, trying 2D...")
+                # Fallback to (batch, samples)
+                waveform_2d = waveform.unsqueeze(0)  # [1, samples]
+                embedding = embedding_model(waveform_2d)
         
-        # Convert to numpy if needed
+        # Check what the model actually returned
+        if hasattr(embedding, 'keys'):
+            logger.info(f"Model returned dict with keys: {embedding.keys()}")
+            # Try to extract the actual embedding
+            if 'embedding' in embedding:
+                embedding = embedding['embedding']
+            elif 'embeddings' in embedding:
+                embedding = embedding['embeddings']
+        
+        # The model returns embeddings of shape (batch, embedding_dim)
+        # Convert to numpy
         if isinstance(embedding, torch.Tensor):
+            logger.info(f"Raw embedding tensor: shape={embedding.shape}, dtype={embedding.dtype}")
             embedding = embedding.cpu().numpy()
         
         # Flatten and normalize to unit vector
         embedding = embedding.flatten()
+        logger.info(f"Flattened embedding: shape={embedding.shape}, pre-norm stats: mean={embedding.mean():.4f}, std={embedding.std():.4f}")
+        
         norm = np.linalg.norm(embedding)
         if norm > 0:
             embedding = embedding / norm
+            # Log embedding stats for debugging
+            logger.info(f"Normalized embedding: mean={embedding.mean():.4f}, std={embedding.std():.4f}, first5={embedding[:5]}")
             return embedding
         
+        logger.warning(f"Embedding has zero norm")
         return None
             
     except Exception as e:
@@ -236,6 +260,8 @@ class SpeakerIdentifier:
         
         # Track recent identifications for smoothing
         self.recent_ids: List[int] = []
+        self.last_speaker_id: Optional[int] = None
+        self.segments_since_last_id: int = 0
         
         logger.info(f"SpeakerIdentifier initialized: threshold={similarity_threshold}, confirm={confirmation_count}")
     
@@ -254,6 +280,8 @@ class SpeakerIdentifier:
         # Extract embedding
         embedding = extract_embedding(audio_float32)
         if embedding is None:
+            audio_energy = np.abs(audio_float32).mean()
+            logger.warning(f"Failed to extract embedding: samples={len(audio_float32)}, duration={len(audio_float32)/SAMPLE_RATE:.2f}s, energy={audio_energy:.6f}")
             return (None, 0.0)
         
         # Find best matching speaker
@@ -261,9 +289,12 @@ class SpeakerIdentifier:
         best_similarity: float = 0.0
         second_best_similarity: float = 0.0
         
+        all_similarities = []
+        
         # Check confirmed speakers
         for speaker in self.speakers.values():
             similarity = cosine_similarity(embedding, speaker.voiceprint)
+            all_similarities.append((speaker.label, similarity, "confirmed"))
             if similarity > best_similarity:
                 second_best_similarity = best_similarity
                 best_similarity = similarity
@@ -274,6 +305,7 @@ class SpeakerIdentifier:
         # Check pending speakers too
         for speaker in self.pending_speakers.values():
             similarity = cosine_similarity(embedding, speaker.voiceprint)
+            all_similarities.append((speaker.label, similarity, "pending"))
             if similarity > best_similarity:
                 second_best_similarity = best_similarity
                 best_similarity = similarity
@@ -281,15 +313,20 @@ class SpeakerIdentifier:
             elif similarity > second_best_similarity:
                 second_best_similarity = similarity
         
+        # Log all similarities for debugging
+        if all_similarities:
+            sim_str = ", ".join([f"{s[0]}:{s[1]:.3f}" for s in all_similarities])
+            logger.info(f"Speaker similarities: [{sim_str}] → best={best_similarity:.3f}")
+        
         # Determine action based on similarity
         if best_match and best_similarity >= self.similarity_threshold:
             # Good match found
             # Check for ambiguity (two speakers with similar scores)
+            # With pyannote's lower similarities, use a smaller gap threshold
             gap = best_similarity - second_best_similarity
-            if gap < 0.08 and best_similarity < self.similarity_threshold + 0.1:
-                # Ambiguous - don't assign
-                logger.debug(f"Ambiguous speaker match: best={best_similarity:.3f}, gap={gap:.3f}")
-                return (None, best_similarity)
+            if gap < 0.05 and second_best_similarity > 0.35:
+                # Ambiguous - but still assign to best match (better than nothing)
+                logger.debug(f"Ambiguous but assigning: best={best_similarity:.3f}, gap={gap:.3f}")
             
             # Update speaker voiceprint
             best_match.update_voiceprint(embedding, best_similarity)
@@ -305,17 +342,52 @@ class SpeakerIdentifier:
             if len(self.recent_ids) > 5:
                 self.recent_ids.pop(0)
             
+            # Track for continuation heuristic
+            self.last_speaker_id = best_match.id
+            self.segments_since_last_id = 0
+            
             return (best_match.label, best_similarity)
         
         elif best_similarity < self.enrollment_threshold:
             # Low similarity to all speakers - likely a new speaker
             new_speaker = self._enroll_new_speaker(embedding)
             if new_speaker:
+                self.last_speaker_id = new_speaker.id
+                self.segments_since_last_id = 0
                 return (new_speaker.label, best_similarity)
+            # If can't enroll, try to match with best pending speaker anyway
+            if best_match and best_similarity >= 0.4:
+                best_match.update_voiceprint(embedding, best_similarity)
+                self.last_speaker_id = best_match.id
+                self.segments_since_last_id = 0
+                return (best_match.label, best_similarity)
         
         # Similarity is between enrollment and match thresholds
-        # Could be a new speaker or a poor quality sample
-        # Be conservative and don't assign
+        # Try to match with best speaker if reasonably close (pyannote gives lower similarities)
+        if best_match and best_similarity >= 0.35:
+            logger.info(f"Marginal match: {best_match.label} with similarity={best_similarity:.3f}")
+            best_match.update_voiceprint(embedding, best_similarity)
+            self.last_speaker_id = best_match.id
+            self.segments_since_last_id = 0
+            # Promote pending speaker to confirmed if enough matches
+            if best_match.id in self.pending_speakers:
+                if best_match.match_count >= self.confirmation_count:
+                    self.speakers[best_match.id] = best_match
+                    del self.pending_speakers[best_match.id]
+                    logger.info(f"✅ Confirmed speaker: {best_match.label} (after {best_match.match_count} matches)")
+            return (best_match.label, best_similarity)
+        
+        # Continuation heuristic: if we recently identified a speaker and this segment
+        # is uncertain, assume it's the same speaker (common in conversations)
+        if self.last_speaker_id is not None and self.segments_since_last_id < 5:
+            last_speaker = self.speakers.get(self.last_speaker_id) or self.pending_speakers.get(self.last_speaker_id)
+            if last_speaker and best_similarity >= 0.25:
+                logger.info(f"Continuation: assigning to recent speaker {last_speaker.label} (similarity={best_similarity:.3f})")
+                last_speaker.update_voiceprint(embedding, best_similarity)
+                self.segments_since_last_id += 1
+                return (last_speaker.label, best_similarity)
+        
+        self.segments_since_last_id += 1
         logger.debug(f"Uncertain speaker: similarity={best_similarity:.3f}")
         return (None, best_similarity)
     
@@ -328,8 +400,9 @@ class SpeakerIdentifier:
             return None
         
         # Check for rapid enrollment (anti-noise protection)
+        # Allow up to 5 pending speakers to handle multi-speaker conversations
         recent_new = sum(1 for s in self.pending_speakers.values() if s.match_count < 2)
-        if recent_new >= 3:
+        if recent_new >= 5:
             logger.debug("Too many pending speakers, waiting for confirmations")
             return None
         
@@ -355,6 +428,14 @@ class SpeakerIdentifier:
     def get_all_speakers(self) -> List[str]:
         """Get labels of all confirmed speakers."""
         return [s.label for s in sorted(self.speakers.values(), key=lambda x: x.id)]
+    
+    def get_last_speaker_label(self) -> Optional[str]:
+        """Get the label of the most recently identified speaker."""
+        if self.last_speaker_id is not None:
+            speaker = self.speakers.get(self.last_speaker_id) or self.pending_speakers.get(self.last_speaker_id)
+            if speaker:
+                return speaker.label
+        return None
     
     def get_stats(self) -> Dict:
         """Get statistics about speaker identification."""

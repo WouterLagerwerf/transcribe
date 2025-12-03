@@ -103,22 +103,22 @@ def download_speaker_embedding_model():
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
         logging.getLogger("lightning_fabric").setLevel(logging.ERROR)
         
-        from pyannote.audio import Inference
+        from pyannote.audio import Model
         
-        # Initialize Inference directly (this downloads and caches the model)
+        # Load the Model directly (this downloads and caches the model)
         try:
-            inference = Inference(
+            model = Model.from_pretrained(
                 "pyannote/embedding",
-                window="whole",
                 use_auth_token=HF_TOKEN
             )
         except TypeError:
-            inference = Inference("pyannote/embedding", window="whole")
+            model = Model.from_pretrained("pyannote/embedding")
         
         # Verify it loaded correctly
-        if inference is not None:
+        if model is not None:
+            model.eval()
             print("✅ Speaker embedding model downloaded and verified")
-            del inference
+            del model
             return True
         else:
             print("⚠️  Model loaded as None - may need to re-download at runtime")

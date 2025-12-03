@@ -605,6 +605,14 @@
                 // Send audio in chunks to simulate streaming
                 const CHUNK_SIZE = SAMPLE_RATE * 3; // 3 seconds of audio per chunk
                 const totalChunks = Math.ceil(int16Data.length / CHUNK_SIZE);
+                let lastMessageTime = Date.now();
+                
+                // Track when we receive messages to know when processing is done
+                const originalOnMessage = ws.onmessage;
+                ws.onmessage = async (event) => {
+                    lastMessageTime = Date.now();
+                    await originalOnMessage(event);
+                };
                 
                 for (let i = 0; i < int16Data.length; i += CHUNK_SIZE) {
                     if (ws.readyState !== WebSocket.OPEN) break;
@@ -621,13 +629,24 @@
                     await new Promise(r => setTimeout(r, 100));
                 }
                 
-                // Wait a bit for final processing then close
-                await new Promise(r => setTimeout(r, 2000));
+                updateStatus('Processing...', 'recording');
+                progressBar.style.width = '100%';
+                percentSpan.textContent = '100%';
+                
+                // Wait for processing to complete (no new messages for 5 seconds)
+                await new Promise(resolve => {
+                    const checkInterval = setInterval(() => {
+                        const timeSinceLastMessage = Date.now() - lastMessageTime;
+                        if (timeSinceLastMessage > 5000) {
+                            clearInterval(checkInterval);
+                            resolve();
+                        }
+                    }, 500);
+                });
+                
                 ws.close();
                 
                 updateStatus('Complete', 'connected');
-                progressBar.style.width = '100%';
-                percentSpan.textContent = '100%';
                 
                 // Hide progress after a delay
                 setTimeout(() => {
