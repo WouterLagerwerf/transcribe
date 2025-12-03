@@ -6,7 +6,8 @@ from faster_whisper import WhisperModel
 from concurrent.futures import ThreadPoolExecutor
 
 from app.config.settings import (
-    MODEL_NAME, MODEL_PATH, LANGUAGE, PROCESSING_THREADS, COMPUTE_TYPE, DEVICE
+    MODEL_NAME, MODEL_PATH, LANGUAGE, PROCESSING_THREADS, COMPUTE_TYPE, DEVICE,
+    BEAM_SIZE, BEST_OF, VAD_MIN_SILENCE_MS, VAD_SPEECH_PAD_MS
 )
 from app.utils.logger import logger
 
@@ -85,39 +86,38 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
     try:
         # Normalize audio to improve detection of soft/unclear voices
         # This amplifies quiet audio while preventing clipping
-        # Use float64 for normalization calculations to reduce rounding errors
-        audio_float64 = audio_data_float32.astype(np.float64)
-        audio_max = np.max(np.abs(audio_float64))
-        if audio_max > 0:
+        # Optimized: Work directly in float32 to avoid costly type conversions
+        audio_max = np.max(np.abs(audio_data_float32))
+        if audio_max > 1e-6:  # Avoid division by very small numbers
             # Normalize to 0.95 to leave headroom and boost soft voices
-            # Calculate in float64 for precision, then convert back to float32
-            audio_normalized = (audio_float64 * (0.95 / audio_max)).astype(np.float32)
+            # In-place multiplication is faster than creating intermediate arrays
+            audio_normalized = audio_data_float32 * (0.95 / audio_max)
         else:
             audio_normalized = audio_data_float32
         
         # faster-whisper returns segments generator
-        # Parameters balanced to reject uncertain/weird predictions while allowing legitimate speech:
-        # - temperature=0.0: Reduces randomness and hallucinations
-        # - condition_on_previous_text=False: Prevents repetitive phrases
-        # - no_speech_threshold=0.4: Balanced threshold to filter uncertain segments but allow speech
-        # - log_prob_threshold=-0.7: Balanced threshold to reject uncertain predictions but allow normal speech
-        # - suppress_blank=True: Suppresses blank outputs
+        # Parameters balanced to reject uncertain/weird predictions while allowing legitimate speech
         # Use auto language detection if LANGUAGE is not set
-        # This helps avoid misinterpreting words (e.g., "Modder" -> "moeder" when forced to Dutch)
         detected_language = LANGUAGE if LANGUAGE else None
+        
+        # Built-in VAD parameters (uses faster-whisper's Silero VAD internally)
+        vad_params = {
+            "min_silence_duration_ms": VAD_MIN_SILENCE_MS,
+            "speech_pad_ms": VAD_SPEECH_PAD_MS,
+        }
         
         segments, info = whisper_model.transcribe(
             audio_normalized,
-            beam_size=10,  # Increased beam size for better articulation accuracy (helps distinguish similar words like "Modder" vs "moeder")
-            best_of=5,  # Try multiple candidates and pick the best (helps with articulation accuracy)
+            beam_size=BEAM_SIZE,  # Configurable beam size (default 5, higher = more accurate but slower)
+            best_of=BEST_OF,  # Configurable candidates (default 1, higher = more accurate but slower)
             language=detected_language,  # None = auto-detect, otherwise use specified language
-            vad_filter=False,  # We handle VAD separately
-            vad_parameters=None,
-            temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),  # Temperature fallback: try multiple temperatures for better accuracy
+            vad_filter=True,  # Always use faster-whisper's built-in VAD
+            vad_parameters=vad_params,
+            temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),  # Temperature fallback for accuracy
             condition_on_previous_text=True,  # Use context from previous text for better articulation
-            no_speech_threshold=0.4,  # Balanced threshold to filter uncertain segments but allow speech (0.0-1.0, higher = stricter)
-            log_prob_threshold=-0.7,  # Balanced threshold to reject uncertain predictions but allow normal speech
-            compression_ratio_threshold=2.4,  # Detect repetitive/hallucinated text (lower = stricter)
+            no_speech_threshold=0.4,  # Balanced threshold to filter uncertain segments
+            log_prob_threshold=-0.7,  # Balanced threshold to reject uncertain predictions
+            compression_ratio_threshold=2.4,  # Detect repetitive/hallucinated text
             suppress_blank=True,  # Suppress blank outputs
             initial_prompt=None,  # Don't bias towards any specific phrases
             word_timestamps=True,  # Enable word-level timestamps for better accuracy

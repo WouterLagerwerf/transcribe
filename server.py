@@ -7,12 +7,10 @@ import signal
 import os
 import websockets
 
-from app.config.settings import USE_VAD, USE_DIARIZATION, SERVER_HOST
+from app.config.settings import USE_DIARIZATION, SERVER_HOST
 from app.utils.logger import logger
 from app.services.transcription import load_model, get_executor
-from app.services.vad import load_vad_model
-from app.services.diarization import load_diarization_model
-from app.services.speaker_enrollment import load_embedding_model
+from app.services.speaker_identification import load_speaker_model
 from app.handlers.health_check import start_http_server
 from app.handlers.websocket_handler import websocket_handler
 
@@ -29,6 +27,7 @@ async def main():
     print("=" * 80, file=sys.stderr)
     print(f"📱 Primary Device: {DEVICE.upper()}", file=sys.stderr)
     print(f"⚙️  Compute Type: {COMPUTE_TYPE}", file=sys.stderr)
+    print(f"🎤 Speaker ID: {'Enabled' if USE_DIARIZATION else 'Disabled'}", file=sys.stderr)
     print("=" * 80, file=sys.stderr)
     print("", file=sys.stderr)
     
@@ -36,32 +35,17 @@ async def main():
     loop = asyncio.get_running_loop()
     executor = get_executor()
     
-    # Load VAD model first if enabled (non-blocking - server will work without it)
-    if USE_VAD:
-        logger.info("VAD enabled - loading VAD model...")
-        try:
-            await loop.run_in_executor(executor, load_vad_model)
-        except Exception as e:
-            logger.warning(f"VAD loading failed: {e}. Continuing without VAD.")
-    
     # Load Whisper model (required - server won't start without it)
+    # Note: VAD is handled by faster-whisper's built-in Silero VAD
     await loop.run_in_executor(executor, load_model)
     
-    # Load diarization model if enabled (non-blocking - server will work without it)
+    # Load speaker embedding model if diarization is enabled
     if USE_DIARIZATION:
-        logger.info("Diarization enabled - loading diarization model...")
+        logger.info("Speaker identification enabled - loading embedding model...")
         try:
-            await loop.run_in_executor(executor, load_diarization_model)
+            await loop.run_in_executor(executor, load_speaker_model)
         except Exception as e:
-            logger.warning(f"Diarization loading failed: {e}. Continuing without diarization.")
-    
-    # Load speaker embedding model for enrollment (non-blocking)
-    if USE_DIARIZATION:
-        logger.info("Loading speaker embedding model for enrollment...")
-        try:
-            await loop.run_in_executor(executor, load_embedding_model)
-        except Exception as e:
-            logger.warning(f"Embedding model loading failed: {e}. Speaker enrollment disabled.")
+            logger.warning(f"Speaker model loading failed: {e}. Continuing without speaker identification.")
     
     # Print summary after all models loaded
     print("", file=sys.stderr)

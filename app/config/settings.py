@@ -42,6 +42,9 @@ else:
 
 print("=" * 80, file=sys.stderr)
 
+# Cached torch device object (avoid repeated torch.device() calls)
+TORCH_DEVICE = torch.device(DEVICE)
+
 # Model Configuration
 MODEL_NAME = os.getenv("MODEL_NAME", "base")
 MODEL_PATH = os.getenv("MODEL_PATH", ".")
@@ -52,17 +55,13 @@ PROCESSING_THREADS = int(os.getenv("PROCESSING_THREADS", 4))
 
 # Audio Processing Configuration
 SAMPLE_RATE = 16000
-CHUNK_SIZE_SECONDS = 3.0  # Duration of audio segment to process at once (fallback if VAD disabled)
+CHUNK_SIZE_SECONDS = 3.0  # Duration of audio segment to process at once
 MAX_SEGMENT_SECONDS = float(os.getenv("MAX_SEGMENT_SECONDS", "3600.0"))  # Maximum segment size (60 minutes default)
 
 # VAD Configuration (Voice Activity Detection)
-USE_VAD = os.getenv("USE_VAD", "true").lower() == "true"
-VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
-VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))  # Pauses to detect end of utterance
-VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "100"))  # Padding around speech
-VAD_MAX_SPEECH_MS = int(os.getenv("VAD_MAX_SPEECH_MS", "5000"))  # Max speech duration before forcing transcription
-# Real-time transcription: transcribe every N seconds during continuous speech (for live updates)
-REALTIME_INTERVAL_SECONDS = float(os.getenv("REALTIME_INTERVAL_SECONDS", "0.8"))  # Transcribe every 0.8 seconds during speech for faster partials
+# Uses faster-whisper's built-in VAD for speech detection
+VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))  # Minimum silence to detect end of speech
+VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "200"))  # Padding around speech segments
 
 # faster-whisper configuration
 # Auto-select compute type based on device: float16 for GPU, int8 for CPU (unless overridden)
@@ -73,17 +72,14 @@ else:
     # Default: float16 for GPU (best performance), int8 for CPU (best performance)
     COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 
-# Speaker Diarization Configuration
+# Transcription parameters (tunable for latency vs accuracy trade-off)
+BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))  # Beam size for decoding (higher = more accurate, slower)
+BEST_OF = int(os.getenv("BEST_OF", "1"))  # Number of candidates to consider (higher = more accurate, slower)
+
+# Speaker Identification Configuration
+# When enabled, uses pyannote embedding model to identify speakers from their voice
 USE_DIARIZATION = os.getenv("USE_DIARIZATION", "true").lower() == "true"
-HF_TOKEN = os.getenv("HF_TOKEN", None)  # HuggingFace token for private models (optional)
+HF_TOKEN = os.getenv("HF_TOKEN", None)  # HuggingFace token for private models (required for speaker ID)
 
-# Speaker Enrollment Configuration
-ENROLLMENT_SIMILARITY_THRESHOLD = float(os.getenv("ENROLLMENT_SIMILARITY_THRESHOLD", "0.72"))  # Cosine similarity threshold (0.0-1.0, higher = stricter matching)
-ENROLLMENT_MIN_SEGMENT_DURATION = float(os.getenv("ENROLLMENT_MIN_SEGMENT_DURATION", "0.35"))  # Minimum segment duration in seconds for reliable embedding
-ENROLLMENT_LEARNING_RATE = float(os.getenv("ENROLLMENT_LEARNING_RATE", "0.2"))  # Learning rate for voiceprint updates (0.0-1.0, lower = more stable, higher = adapts faster)
-ENROLLMENT_MIN_CONFIDENCE = float(os.getenv("ENROLLMENT_MIN_CONFIDENCE", "0.68"))  # Minimum confidence to enroll new speaker (prevents noise enrollment)
-ENROLLMENT_ADAPTIVE_THRESHOLD = os.getenv("ENROLLMENT_ADAPTIVE_THRESHOLD", "true").lower() == "true"  # Adjust threshold based on number of speakers
-ENROLLMENT_MAX_SPEAKERS = int(os.getenv("ENROLLMENT_MAX_SPEAKERS", "10"))  # Maximum number of speakers to enroll
-ENROLLMENT_MIN_SAMPLES = int(os.getenv("ENROLLMENT_MIN_SAMPLES", "2"))  # Minimum number of embeddings before considering speaker "stable"
-ENROLLMENT_CONFIDENCE_WINDOW = int(os.getenv("ENROLLMENT_CONFIDENCE_WINDOW", "5"))  # Number of recent similarities to track for confidence
-
+# Note: Speaker identification tuning parameters (SPEAKER_*) are loaded directly in speaker_identification.py
+# This avoids circular imports and keeps configuration close to the code that uses it
