@@ -1,266 +1,224 @@
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Live Transcription</title>
-
-        <link rel="icon" href="/favicon.ico" sizes="any">
-        <link rel="preconnect" href="https://fonts.bunny.net">
-    <link href="https://fonts.bunny.net/css?family=jetbrains-mono:400,500,600,700&family=plus-jakarta-sans:400,500,600,700" rel="stylesheet" />
-    
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="preconnect" href="https://fonts.bunny.net">
+    <link href="https://fonts.bunny.net/css?family=inter:400,500,600&display=swap" rel="stylesheet" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
-            darkMode: 'class',
             theme: {
                 extend: {
                     fontFamily: {
-                        sans: ['Plus Jakarta Sans', 'system-ui', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace'],
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
                     },
                     colors: {
-                        midnight: {
-                            900: '#0a0a0f',
-                            800: '#12121a',
-                            700: '#1a1a24',
-                            600: '#22222e',
-                        },
-                        accent: {
-                            cyan: '#06b6d4',
-                            purple: '#a855f7',
-                            pink: '#ec4899',
-                            orange: '#f97316',
-                            green: '#22c55e',
+                        whatsapp: {
+                            dark: '#111b21',
+                            darker: '#0b141a',
+                            panel: '#202c33',
+                            header: '#202c33',
+                            teal: '#00a884',
+                            tealDark: '#008069',
+                            bubble: '#005c4b',
+                            bubbleIn: '#202c33',
+                            input: '#2a3942',
+                            border: '#2a3942',
+                            text: '#e9edef',
+                            textSecondary: '#8696a0',
                         }
                     }
                 }
             }
         }
     </script>
-        <style>
-        .gradient-border {
-            background: linear-gradient(135deg, #06b6d4, #a855f7, #ec4899);
-            padding: 1px;
-            border-radius: 1rem;
-        }
-        .gradient-border-inner {
-            background: #12121a;
-            border-radius: calc(1rem - 1px);
-        }
-        .speaker-0 { --speaker-color: #06b6d4; }
-        .speaker-1 { --speaker-color: #a855f7; }
-        .speaker-2 { --speaker-color: #ec4899; }
-        .speaker-3 { --speaker-color: #f97316; }
-        .speaker-4 { --speaker-color: #22c55e; }
-        .speaker-5 { --speaker-color: #eab308; }
-        .speaker-6 { --speaker-color: #ef4444; }
-        .speaker-7 { --speaker-color: #3b82f6; }
-        
-        .pulse-ring {
-            animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
-        @keyframes pulse-ring {
-            0%, 100% { transform: scale(1); opacity: 0.3; }
-            50% { transform: scale(1.1); opacity: 0.1; }
+    <style>
+        /* Chat background pattern */
+        .chat-bg {
+            background-color: #0b141a;
+            background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23182229' fill-opacity='0.4'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
         }
         
-        .waveform-bar {
-            animation: waveform 0.5s ease-in-out infinite alternate;
+        /* Message bubble tails */
+        .bubble-out::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: -8px;
+            width: 0;
+            height: 0;
+            border-left: 8px solid #005c4b;
+            border-top: 8px solid transparent;
         }
+        .bubble-in::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -8px;
+            width: 0;
+            height: 0;
+            border-right: 8px solid #202c33;
+            border-top: 8px solid transparent;
+        }
+        
+        /* Speaker colors for avatars */
+        .speaker-0 { background: linear-gradient(135deg, #00a884, #008069); }
+        .speaker-1 { background: linear-gradient(135deg, #7c3aed, #5b21b6); }
+        .speaker-2 { background: linear-gradient(135deg, #ec4899, #be185d); }
+        .speaker-3 { background: linear-gradient(135deg, #f97316, #c2410c); }
+        .speaker-4 { background: linear-gradient(135deg, #14b8a6, #0d9488); }
+        .speaker-5 { background: linear-gradient(135deg, #eab308, #a16207); }
+        .speaker-6 { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+        .speaker-7 { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
+        
+        /* Bubble colors per speaker */
+        .bubble-speaker-0 { background-color: #005c4b; }
+        .bubble-speaker-1 { background-color: #4c1d95; }
+        .bubble-speaker-2 { background-color: #831843; }
+        .bubble-speaker-3 { background-color: #7c2d12; }
+        .bubble-speaker-4 { background-color: #134e4a; }
+        .bubble-speaker-5 { background-color: #713f12; }
+        .bubble-speaker-6 { background-color: #7f1d1d; }
+        .bubble-speaker-7 { background-color: #1e3a8a; }
+        
+        .message-enter {
+            animation: messageSlide 0.2s ease-out;
+        }
+        @keyframes messageSlide {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+        
+        /* Waveform animation */
+        .waveform-bar { animation: wave 0.5s ease-in-out infinite alternate; }
         .waveform-bar:nth-child(1) { animation-delay: 0s; }
         .waveform-bar:nth-child(2) { animation-delay: 0.1s; }
         .waveform-bar:nth-child(3) { animation-delay: 0.2s; }
         .waveform-bar:nth-child(4) { animation-delay: 0.1s; }
         .waveform-bar:nth-child(5) { animation-delay: 0s; }
-        
-        @keyframes waveform {
-            from { height: 8px; }
+        @keyframes wave {
+            from { height: 12px; }
             to { height: 24px; }
         }
-        
-        .transcript-enter {
-            animation: slideIn 0.3s ease-out;
-        }
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #22222e; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #2a2a38; }
-        </style>
-    </head>
-<body class="bg-midnight-900 text-white min-h-screen font-sans antialiased">
-    <div class="min-h-screen flex flex-col">
+    </style>
+</head>
+<body class="bg-whatsapp-darker text-whatsapp-text font-sans antialiased">
+    <div class="h-screen flex flex-col max-w-4xl mx-auto shadow-2xl">
         <!-- Header -->
-        <header class="border-b border-white/5 backdrop-blur-xl bg-midnight-900/80 sticky top-0 z-50">
-            <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-purple-600 flex items-center justify-center">
-                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
-                        </svg>
-                    </div>
-                    <div>
-                        <h1 class="font-semibold text-lg">Live Transcription</h1>
-                        <p class="text-xs text-white/40">Real-time speech-to-text with speaker identification</p>
-                    </div>
-                </div>
-                
-                <!-- Status indicator -->
-                <div id="status-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 text-sm">
-                    <span id="status-dot" class="w-2 h-2 rounded-full bg-white/20"></span>
-                    <span id="status-text" class="text-white/60">Disconnected</span>
-                </div>
+        <header class="bg-whatsapp-header px-4 py-3 flex items-center gap-4 border-b border-whatsapp-border">
+            <div class="w-10 h-10 rounded-full bg-gradient-to-br from-whatsapp-teal to-whatsapp-tealDark flex items-center justify-center">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                </svg>
+            </div>
+            <div class="flex-1">
+                <h1 class="font-semibold text-whatsapp-text">Live Transcription</h1>
+                <p id="status-text" class="text-xs text-whatsapp-textSecondary">Tap mic to start</p>
+            </div>
+            <div id="speaker-badges" class="flex -space-x-2">
+                <!-- Speaker avatars will appear here -->
             </div>
         </header>
 
-        <!-- Main content -->
-        <main class="flex-1 flex flex-col max-w-5xl mx-auto w-full px-6 py-8">
-            <!-- Transcript area -->
-            <div class="flex-1 mb-6">
-                <div class="gradient-border h-full">
-                    <div class="gradient-border-inner h-full p-6">
-                        <div id="transcript-container" class="h-[calc(100vh-340px)] min-h-[300px] overflow-y-auto space-y-4">
-                            <!-- Empty state -->
-                            <div id="empty-state" class="h-full flex flex-col items-center justify-center text-center">
-                                <div class="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-purple-600/20 flex items-center justify-center mb-6">
-                                    <svg class="w-10 h-10 text-white/30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
-                                    </svg>
-                                </div>
-                                <h3 class="text-xl font-semibold text-white/80 mb-2">Ready to transcribe</h3>
-                                <p class="text-white/40 max-w-md">Click the button below to start recording. Your speech will be transcribed in real-time with automatic speaker identification.</p>
-                            </div>
-                            
-                            <!-- Transcripts will be inserted here -->
+        <!-- Chat Area -->
+        <main id="chat-container" class="flex-1 overflow-y-auto chat-bg p-4">
+            <!-- Empty state -->
+            <div id="empty-state" class="h-full flex flex-col items-center justify-center text-center px-8">
+                <div class="w-24 h-24 rounded-full bg-whatsapp-panel flex items-center justify-center mb-6">
+                    <svg class="w-12 h-12 text-whatsapp-textSecondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-medium text-whatsapp-text mb-2">Start a conversation</h3>
+                <p class="text-whatsapp-textSecondary text-sm max-w-sm">Record audio or upload a file. Speech will be transcribed with automatic speaker identification.</p>
+            </div>
+            
+            <!-- Messages will be inserted here -->
+            <div id="messages-container" class="space-y-1 hidden"></div>
+        </main>
+
+        <!-- Input Area -->
+        <footer class="bg-whatsapp-header px-4 py-3 border-t border-whatsapp-border">
+            <!-- Upload progress -->
+            <div id="upload-progress" class="hidden mb-3">
+                <div class="flex items-center gap-3 bg-whatsapp-panel rounded-lg p-3">
+                    <div class="flex-1">
+                        <div class="flex justify-between text-xs mb-1">
+                            <span id="upload-filename" class="text-whatsapp-text truncate"></span>
+                            <span id="upload-percent" class="text-whatsapp-textSecondary">0%</span>
+                        </div>
+                        <div class="h-1 bg-whatsapp-dark rounded-full overflow-hidden">
+                            <div id="upload-bar" class="h-full bg-whatsapp-teal rounded-full transition-all duration-300" style="width: 0%"></div>
                         </div>
                     </div>
                 </div>
             </div>
-
-            <!-- Controls -->
-            <div class="flex flex-col items-center gap-6">
-                <!-- Buttons row -->
-                <div class="flex items-center gap-6">
-                    <!-- Upload button -->
-                    <button 
-                        id="upload-btn" 
-                        class="group relative"
-                        onclick="document.getElementById('audio-file-input').click()"
-                    >
-                        <div class="relative w-16 h-16 rounded-full bg-gradient-to-br from-orange-500 to-pink-600 flex items-center justify-center shadow-lg shadow-orange-500/25 transition-all duration-300 group-hover:scale-105 group-hover:shadow-xl group-hover:shadow-orange-500/30">
-                            <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
-                            </svg>
-                        </div>
-                    </button>
-                    <input type="file" id="audio-file-input" accept="audio/*" class="hidden" onchange="handleFileUpload(event)">
-                    
-                    <!-- Recording button -->
-                    <button 
-                        id="record-btn" 
-                        class="group relative"
-                        onclick="toggleRecording()"
-                    >
-                        <!-- Pulse rings (visible when recording) -->
-                        <div id="pulse-rings" class="absolute inset-0 hidden">
-                            <div class="absolute inset-0 rounded-full bg-red-500/20 pulse-ring"></div>
-                            <div class="absolute inset-2 rounded-full bg-red-500/20 pulse-ring" style="animation-delay: 0.5s"></div>
-                        </div>
-                        
-                        <!-- Button -->
-                        <div id="record-btn-inner" class="relative w-20 h-20 rounded-full bg-gradient-to-br from-cyan-500 to-purple-600 flex items-center justify-center shadow-lg shadow-cyan-500/25 transition-all duration-300 group-hover:scale-105 group-hover:shadow-xl group-hover:shadow-cyan-500/30">
-                            <!-- Mic icon (not recording) -->
-                            <svg id="mic-icon" class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
-                            </svg>
-
-                            <!-- Waveform (recording) -->
-                            <div id="waveform" class="hidden flex items-center gap-1">
-                                <div class="waveform-bar w-1 bg-white rounded-full"></div>
-                                <div class="waveform-bar w-1 bg-white rounded-full"></div>
-                                <div class="waveform-bar w-1 bg-white rounded-full"></div>
-                                <div class="waveform-bar w-1 bg-white rounded-full"></div>
-                                <div class="waveform-bar w-1 bg-white rounded-full"></div>
-                            </div>
-                        </div>
-                    </button>
-                </div>
+            
+            <div class="flex items-center gap-3">
+                <!-- Upload button -->
+                <button onclick="document.getElementById('audio-file-input').click()" 
+                        class="w-10 h-10 rounded-full bg-whatsapp-panel hover:bg-whatsapp-input transition-colors flex items-center justify-center text-whatsapp-textSecondary hover:text-whatsapp-text">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path>
+                    </svg>
+                </button>
+                <input type="file" id="audio-file-input" accept="audio/*" class="hidden" onchange="handleFileUpload(event)">
                 
-                <p id="record-text" class="text-white/40 text-sm">Click mic to record • Click cloud to upload audio file</p>
-                
-                <!-- Upload progress -->
-                <div id="upload-progress" class="hidden w-full max-w-md">
-                    <div class="flex items-center justify-between mb-2">
-                        <span id="upload-filename" class="text-sm text-white/60 truncate"></span>
-                        <span id="upload-percent" class="text-sm text-white/40 font-mono">0%</span>
-                    </div>
-                    <div class="h-1.5 bg-white/10 rounded-full overflow-hidden">
-                        <div id="upload-bar" class="h-full bg-gradient-to-r from-orange-500 to-pink-500 rounded-full transition-all duration-300" style="width: 0%"></div>
+                <!-- Session info display -->
+                <div id="session-info" class="hidden flex-1 bg-whatsapp-panel rounded-full px-4 py-2">
+                    <div class="flex items-center gap-4 text-xs text-whatsapp-textSecondary">
+                        <span>Session: <span id="session-id" class="text-whatsapp-text font-mono">--</span></span>
+                        <span>•</span>
+                        <span><span id="speaker-count" class="text-whatsapp-text">0</span> speakers</span>
+                        <span>•</span>
+                        <span id="duration" class="text-whatsapp-text font-mono">00:00</span>
                     </div>
                 </div>
-                
-                <!-- Session info -->
-                <div id="session-info" class="hidden flex items-center gap-4 text-xs text-white/30">
-                    <span>Session: <span id="session-id" class="font-mono text-white/50">--</span></span>
-                    <span>•</span>
-                    <span>Speakers: <span id="speaker-count" class="text-white/50">0</span></span>
-                    <span>•</span>
-                    <span>Duration: <span id="duration" class="font-mono text-white/50">00:00</span></span>
+                <div id="placeholder-input" class="flex-1 bg-whatsapp-panel rounded-full px-4 py-2.5 text-sm text-whatsapp-textSecondary">
+                    Tap mic to record or attach audio file
                 </div>
-            </div>
-            </main>
-
-        <!-- Footer -->
-        <footer class="border-t border-white/5 py-4">
-            <div class="max-w-5xl mx-auto px-6 flex items-center justify-between text-xs text-white/30">
-                <span>Powered by Whisper AI + Pyannote</span>
-                <span>16kHz • 16-bit PCM • Mono</span>
+                
+                <!-- Record button -->
+                <button id="record-btn" onclick="toggleRecording()" 
+                        class="w-12 h-12 rounded-full bg-whatsapp-teal hover:bg-whatsapp-tealDark transition-all flex items-center justify-center shadow-lg">
+                    <svg id="mic-icon" class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                    </svg>
+                    <div id="waveform" class="hidden flex items-center gap-0.5">
+                        <div class="waveform-bar w-1 bg-white rounded-full"></div>
+                        <div class="waveform-bar w-1 bg-white rounded-full"></div>
+                        <div class="waveform-bar w-1 bg-white rounded-full"></div>
+                        <div class="waveform-bar w-1 bg-white rounded-full"></div>
+                        <div class="waveform-bar w-1 bg-white rounded-full"></div>
+                    </div>
+                </button>
             </div>
         </footer>
-        </div>
+    </div>
 
     <script>
-        // Configuration
         const WEBSOCKET_URL = 'ws://localhost:8765';
         const SAMPLE_RATE = 16000;
         
-        // State
         let isRecording = false;
         let websocket = null;
-        let mediaRecorder = null;
         let audioContext = null;
-        let audioWorklet = null;
         let sessionId = null;
         let startTime = null;
         let durationInterval = null;
-        let speakers = new Set();
+        let speakers = new Map(); // speaker -> {color, messageCount}
+        let lastSpeaker = null;
         
-        // Speaker colors
-        const speakerColors = [
-            'from-cyan-500 to-cyan-400',
-            'from-purple-500 to-purple-400',
-            'from-pink-500 to-pink-400',
-            'from-orange-500 to-orange-400',
-            'from-green-500 to-green-400',
-            'from-yellow-500 to-yellow-400',
-            'from-red-500 to-red-400',
-            'from-blue-500 to-blue-400',
-        ];
-        
-        function getSpeakerColor(speaker) {
-            if (!speaker) return 'from-gray-500 to-gray-400';
-            const match = speaker.match(/SPEAKER_(\d+)/);
-            if (match) {
-                const idx = parseInt(match[1]) % speakerColors.length;
-                return speakerColors[idx];
-            }
-            return 'from-gray-500 to-gray-400';
-        }
+        const speakerColors = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3', 'speaker-4', 'speaker-5', 'speaker-6', 'speaker-7'];
+        const bubbleColors = ['bubble-speaker-0', 'bubble-speaker-1', 'bubble-speaker-2', 'bubble-speaker-3', 'bubble-speaker-4', 'bubble-speaker-5', 'bubble-speaker-6', 'bubble-speaker-7'];
         
         function getSpeakerIndex(speaker) {
             if (!speaker) return -1;
@@ -268,21 +226,8 @@
             return match ? parseInt(match[1]) : -1;
         }
         
-        function updateStatus(status, color) {
-            const dot = document.getElementById('status-dot');
-            const text = document.getElementById('status-text');
-            
-            const colors = {
-                'disconnected': 'bg-white/20',
-                'connecting': 'bg-yellow-500 animate-pulse',
-                'connected': 'bg-green-500',
-                'recording': 'bg-red-500 animate-pulse',
-                'error': 'bg-red-500',
-            };
-            
-            dot.className = `w-2 h-2 rounded-full ${colors[color] || colors.disconnected}`;
-            text.textContent = status;
-            text.className = color === 'error' ? 'text-red-400' : 'text-white/60';
+        function updateStatus(text) {
+            document.getElementById('status-text').textContent = text;
         }
         
         function updateDuration() {
@@ -293,61 +238,116 @@
             document.getElementById('duration').textContent = `${minutes}:${seconds}`;
         }
         
-        function addTranscript(data) {
-            const container = document.getElementById('transcript-container');
+        function updateSpeakerBadges() {
+            const container = document.getElementById('speaker-badges');
+            container.innerHTML = '';
+            
+            speakers.forEach((data, speaker) => {
+                const idx = getSpeakerIndex(speaker);
+                const colorClass = speakerColors[idx % speakerColors.length];
+                const badge = document.createElement('div');
+                badge.className = `w-8 h-8 rounded-full ${colorClass} flex items-center justify-center text-white text-xs font-semibold ring-2 ring-whatsapp-header`;
+                badge.textContent = `S${idx}`;
+                badge.title = speaker;
+                container.appendChild(badge);
+            });
+        }
+        
+        function addMessage(data) {
+            const container = document.getElementById('messages-container');
             const emptyState = document.getElementById('empty-state');
             
-            // Hide empty state
-            if (emptyState) {
-                emptyState.classList.add('hidden');
-            }
+            // Show messages, hide empty state
+            emptyState.classList.add('hidden');
+            container.classList.remove('hidden');
+            
+            const speaker = data.speaker || 'Unknown';
+            const speakerIdx = getSpeakerIndex(speaker);
+            const colorClass = speakerColors[Math.max(0, speakerIdx) % speakerColors.length];
+            const bubbleColor = bubbleColors[Math.max(0, speakerIdx) % bubbleColors.length];
             
             // Track speakers
-            if (data.speaker) {
-                speakers.add(data.speaker);
+            if (!speakers.has(speaker)) {
+                speakers.set(speaker, { messageCount: 0 });
                 document.getElementById('speaker-count').textContent = speakers.size;
+                updateSpeakerBadges();
             }
-            
-            const speakerIdx = getSpeakerIndex(data.speaker);
-            const speakerColor = getSpeakerColor(data.speaker);
-            const speakerClass = speakerIdx >= 0 ? `speaker-${speakerIdx % 8}` : '';
-            
-            const div = document.createElement('div');
-            div.className = `transcript-enter flex gap-4 ${speakerClass}`;
+            speakers.get(speaker).messageCount++;
             
             const timestamp = new Date().toLocaleTimeString('en-US', { 
                 hour: '2-digit', 
                 minute: '2-digit',
-                second: '2-digit',
                 hour12: false 
             });
             
-            div.innerHTML = `
-                <div class="flex-shrink-0">
-                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br ${speakerColor} flex items-center justify-center text-white text-sm font-semibold shadow-lg">
-                        ${data.speaker ? data.speaker.replace('SPEAKER_', 'S') : '?'}
-                    </div>
-                </div>
-                <div class="flex-1 min-w-0">
-                    <div class="flex items-center gap-2 mb-1">
-                        <span class="font-medium text-white/90">${data.speaker || 'Unknown'}</span>
-                        <span class="text-xs text-white/30 font-mono">${timestamp}</span>
-                        <span class="text-xs text-white/20">${data.start?.toFixed(1) || '0.0'}s - ${data.end?.toFixed(1) || '0.0'}s</span>
-                    </div>
-                    <p class="text-white/70 leading-relaxed">${escapeHtml(data.transcript)}</p>
-                </div>
-            `;
+            // Determine if this is a new speaker (show avatar) or continuation
+            const isNewSpeaker = lastSpeaker !== speaker;
+            lastSpeaker = speaker;
             
-            container.appendChild(div);
+            // Alternate sides based on speaker index (even = left, odd = right)
+            const isRight = speakerIdx % 2 === 0;
+            
+            const wrapper = document.createElement('div');
+            wrapper.className = `message-enter flex ${isRight ? 'justify-end' : 'justify-start'} ${isNewSpeaker ? 'mt-4' : 'mt-0.5'}`;
+            
+            const messageGroup = document.createElement('div');
+            messageGroup.className = `flex items-end gap-2 max-w-[85%] ${isRight ? 'flex-row-reverse' : ''}`;
+            
+            // Avatar (only for new speaker)
+            if (isNewSpeaker) {
+                const avatar = document.createElement('div');
+                avatar.className = `w-8 h-8 rounded-full ${colorClass} flex items-center justify-center text-white text-xs font-semibold flex-shrink-0`;
+                avatar.textContent = `S${speakerIdx >= 0 ? speakerIdx : '?'}`;
+                messageGroup.appendChild(avatar);
+            } else {
+                const spacer = document.createElement('div');
+                spacer.className = 'w-8 flex-shrink-0';
+                messageGroup.appendChild(spacer);
+            }
+            
+            // Bubble
+            const bubble = document.createElement('div');
+            bubble.className = `relative px-3 py-2 rounded-lg ${bubbleColor} ${isNewSpeaker ? (isRight ? 'rounded-tr-none' : 'rounded-tl-none') : ''}`;
+            
+            // Add tail for new speaker messages
+            if (isNewSpeaker) {
+                const tail = document.createElement('div');
+                tail.className = `absolute top-0 ${isRight ? '-right-2' : '-left-2'} w-0 h-0`;
+                tail.style.cssText = isRight 
+                    ? `border-left: 8px solid; border-left-color: inherit; border-top: 8px solid transparent;`
+                    : `border-right: 8px solid; border-right-color: inherit; border-top: 8px solid transparent;`;
+                bubble.appendChild(tail);
+            }
+            
+            // Speaker name (for new speaker)
+            if (isNewSpeaker) {
+                const nameEl = document.createElement('div');
+                nameEl.className = 'text-xs font-medium text-whatsapp-teal mb-1';
+                nameEl.textContent = speaker;
+                bubble.appendChild(nameEl);
+            }
+            
+            // Message text
+            const textEl = document.createElement('p');
+            textEl.className = 'text-sm text-whatsapp-text leading-relaxed';
+            textEl.textContent = data.transcript;
+            bubble.appendChild(textEl);
+            
+            // Timestamp
+            const timeEl = document.createElement('div');
+            timeEl.className = 'flex items-center justify-end gap-1 mt-1';
+            timeEl.innerHTML = `
+                <span class="text-[10px] text-whatsapp-textSecondary">${data.start?.toFixed(1) || '0'}s</span>
+                <span class="text-[10px] text-whatsapp-textSecondary">${timestamp}</span>
+            `;
+            bubble.appendChild(timeEl);
+            
+            messageGroup.appendChild(bubble);
+            wrapper.appendChild(messageGroup);
+            container.appendChild(wrapper);
             
             // Scroll to bottom
-            container.scrollTop = container.scrollHeight;
-        }
-        
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            document.getElementById('chat-container').scrollTop = document.getElementById('chat-container').scrollHeight;
         }
         
         async function toggleRecording() {
@@ -360,122 +360,82 @@
         
         async function startRecording() {
             try {
-                updateStatus('Connecting...', 'connecting');
+                updateStatus('Connecting...');
                 
-                // Connect to WebSocket
                 websocket = new WebSocket(WEBSOCKET_URL);
-                
-                websocket.onopen = async () => {
-                    console.log('WebSocket connected');
-                };
                 
                 websocket.onmessage = async (event) => {
                     try {
-                        // Handle both text and Blob messages
-                        let text;
-                        if (event.data instanceof Blob) {
-                            text = await event.data.text();
-                        } else {
-                            text = event.data;
-                        }
-                        
+                        let text = event.data instanceof Blob ? await event.data.text() : event.data;
                         const data = JSON.parse(text);
-                        console.log('Received:', data);
                         
                         if (data.type === 'session_start') {
                             sessionId = data.session_id;
                             document.getElementById('session-id').textContent = sessionId.substring(0, 8);
                             document.getElementById('session-info').classList.remove('hidden');
-                            updateStatus('Recording...', 'recording');
+                            document.getElementById('placeholder-input').classList.add('hidden');
+                            updateStatus(`Recording • ${speakers.size} speakers`);
                         } else if (data.transcript) {
-                            addTranscript(data);
+                            addMessage(data);
+                            updateStatus(`Recording • ${speakers.size} speakers`);
                         }
                     } catch (e) {
                         console.error('Error parsing message:', e);
                     }
                 };
                 
-                websocket.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    updateStatus('Connection error', 'error');
+                websocket.onerror = () => {
+                    updateStatus('Connection error');
                     stopRecording();
                 };
                 
                 websocket.onclose = () => {
-                    console.log('WebSocket closed');
-                    if (isRecording) {
-                        stopRecording();
-                    }
+                    if (isRecording) stopRecording();
                 };
                 
-                // Wait for connection
                 await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error('Connection timeout')), 5000);
-                    websocket.addEventListener('open', () => {
-                        clearTimeout(timeout);
-                        resolve();
-                    });
-                    websocket.addEventListener('error', () => {
-                        clearTimeout(timeout);
-                        reject(new Error('Connection failed'));
-                    });
+                    const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+                    websocket.addEventListener('open', () => { clearTimeout(timeout); resolve(); });
+                    websocket.addEventListener('error', () => { clearTimeout(timeout); reject(); });
                 });
                 
-                // Get microphone access
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        sampleRate: SAMPLE_RATE,
-                        channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                    }
+                    audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }
                 });
                 
-                // Create audio context for resampling
                 audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
                 const source = audioContext.createMediaStreamSource(stream);
-                
-                // Use ScriptProcessorNode for audio processing (simpler than AudioWorklet)
-                const bufferSize = 4096;
-                const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
                 
                 processor.onaudioprocess = (e) => {
                     if (!isRecording || websocket.readyState !== WebSocket.OPEN) return;
-                    
                     const inputData = e.inputBuffer.getChannelData(0);
-                    
-                    // Convert float32 to int16
                     const int16Data = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         const s = Math.max(-1, Math.min(1, inputData[i]));
                         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
-                    
-                    // Send as binary
                     websocket.send(int16Data.buffer);
                 };
                 
                 source.connect(processor);
                 processor.connect(audioContext.destination);
                 
-                // Update UI
                 isRecording = true;
                 startTime = Date.now();
                 speakers.clear();
+                lastSpeaker = null;
                 
                 document.getElementById('mic-icon').classList.add('hidden');
                 document.getElementById('waveform').classList.remove('hidden');
-                document.getElementById('pulse-rings').classList.remove('hidden');
-                document.getElementById('record-btn-inner').classList.remove('from-cyan-500', 'to-purple-600', 'shadow-cyan-500/25');
-                document.getElementById('record-btn-inner').classList.add('from-red-500', 'to-red-600', 'shadow-red-500/25');
-                document.getElementById('record-text').textContent = 'Click to stop recording';
+                document.getElementById('record-btn').classList.add('bg-red-500', 'hover:bg-red-600');
+                document.getElementById('record-btn').classList.remove('bg-whatsapp-teal', 'hover:bg-whatsapp-tealDark');
                 
-                // Start duration timer
                 durationInterval = setInterval(updateDuration, 1000);
                 
             } catch (error) {
-                console.error('Error starting recording:', error);
-                updateStatus('Error: ' + error.message, 'error');
+                console.error('Error:', error);
+                updateStatus('Error: ' + error.message);
                 stopRecording();
             }
         }
@@ -483,43 +443,23 @@
         function stopRecording() {
             isRecording = false;
             
-            // Close WebSocket
-            if (websocket) {
-                websocket.close();
-                websocket = null;
-            }
+            if (websocket) { websocket.close(); websocket = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+            if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
             
-            // Close audio context
-            if (audioContext) {
-                audioContext.close();
-                audioContext = null;
-            }
-            
-            // Clear duration timer
-            if (durationInterval) {
-                clearInterval(durationInterval);
-                durationInterval = null;
-            }
-            
-            // Update UI
             document.getElementById('mic-icon').classList.remove('hidden');
             document.getElementById('waveform').classList.add('hidden');
-            document.getElementById('pulse-rings').classList.add('hidden');
-            document.getElementById('record-btn-inner').classList.add('from-cyan-500', 'to-purple-600', 'shadow-cyan-500/25');
-            document.getElementById('record-btn-inner').classList.remove('from-red-500', 'to-red-600', 'shadow-red-500/25');
-            document.getElementById('record-text').textContent = 'Click mic to record • Click cloud to upload audio file';
+            document.getElementById('record-btn').classList.remove('bg-red-500', 'hover:bg-red-600');
+            document.getElementById('record-btn').classList.add('bg-whatsapp-teal', 'hover:bg-whatsapp-tealDark');
             
-            updateStatus('Disconnected', 'disconnected');
+            updateStatus('Tap mic to start');
         }
         
         async function handleFileUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
-            
-            // Reset file input so same file can be selected again
             event.target.value = '';
             
-            // Show progress
             const progressDiv = document.getElementById('upload-progress');
             const filenameSpan = document.getElementById('upload-filename');
             const percentSpan = document.getElementById('upload-percent');
@@ -531,21 +471,12 @@
             progressBar.style.width = '0%';
             
             try {
-                updateStatus('Processing audio...', 'connecting');
+                updateStatus('Processing audio...');
                 
-                // Read the audio file
                 const arrayBuffer = await file.arrayBuffer();
-                
-                // Decode the audio
                 const tempContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-                let audioBuffer;
-                try {
-                    audioBuffer = await tempContext.decodeAudioData(arrayBuffer);
-                } catch (e) {
-                    throw new Error('Could not decode audio file. Please try a different format (MP3, WAV, M4A, etc.)');
-                }
+                const audioBuffer = await tempContext.decodeAudioData(arrayBuffer);
                 
-                // Resample to 16kHz mono
                 const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * SAMPLE_RATE, SAMPLE_RATE);
                 const source = offlineContext.createBufferSource();
                 source.buffer = audioBuffer;
@@ -555,7 +486,6 @@
                 const resampledBuffer = await offlineContext.startRendering();
                 const floatData = resampledBuffer.getChannelData(0);
                 
-                // Convert float32 to int16
                 const int16Data = new Int16Array(floatData.length);
                 for (let i = 0; i < floatData.length; i++) {
                     const s = Math.max(-1, Math.min(1, floatData[i]));
@@ -564,102 +494,75 @@
                 
                 await tempContext.close();
                 
-                // Connect to WebSocket
-                updateStatus('Connecting...', 'connecting');
+                updateStatus('Connecting...');
                 const ws = new WebSocket(WEBSOCKET_URL);
                 
                 await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error('Connection timeout')), 5000);
+                    const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
                     ws.onopen = () => { clearTimeout(timeout); resolve(); };
-                    ws.onerror = () => { clearTimeout(timeout); reject(new Error('Connection failed')); };
+                    ws.onerror = () => { clearTimeout(timeout); reject(); };
                 });
                 
-                // Set up message handler
+                let lastMessageTime = Date.now();
+                speakers.clear();
+                lastSpeaker = null;
+                
                 ws.onmessage = async (event) => {
+                    lastMessageTime = Date.now();
                     try {
-                        let text;
-                        if (event.data instanceof Blob) {
-                            text = await event.data.text();
-                        } else {
-                            text = event.data;
-                        }
-                        
+                        let text = event.data instanceof Blob ? await event.data.text() : event.data;
                         const data = JSON.parse(text);
-                        console.log('Received:', data);
                         
                         if (data.type === 'session_start') {
                             sessionId = data.session_id;
                             document.getElementById('session-id').textContent = sessionId.substring(0, 8);
                             document.getElementById('session-info').classList.remove('hidden');
+                            document.getElementById('placeholder-input').classList.add('hidden');
                         } else if (data.transcript) {
-                            addTranscript(data);
+                            addMessage(data);
+                            updateStatus(`Processing • ${speakers.size} speakers`);
                         }
-                    } catch (e) {
-                        console.error('Error parsing message:', e);
-                    }
+                    } catch (e) {}
                 };
                 
-                updateStatus('Uploading audio...', 'recording');
-                speakers.clear();
-                
-                // Send audio in chunks to simulate streaming
-                const CHUNK_SIZE = SAMPLE_RATE * 3; // 3 seconds of audio per chunk
-                const totalChunks = Math.ceil(int16Data.length / CHUNK_SIZE);
-                let lastMessageTime = Date.now();
-                
-                // Track when we receive messages to know when processing is done
-                const originalOnMessage = ws.onmessage;
-                ws.onmessage = async (event) => {
-                    lastMessageTime = Date.now();
-                    await originalOnMessage(event);
-                };
+                updateStatus('Uploading...');
+                const CHUNK_SIZE = SAMPLE_RATE * 3;
                 
                 for (let i = 0; i < int16Data.length; i += CHUNK_SIZE) {
                     if (ws.readyState !== WebSocket.OPEN) break;
-                    
-                    const chunk = int16Data.slice(i, i + CHUNK_SIZE);
-                    ws.send(chunk.buffer);
-                    
-                    // Update progress
+                    ws.send(int16Data.slice(i, i + CHUNK_SIZE).buffer);
                     const progress = Math.min(100, Math.round((i + CHUNK_SIZE) / int16Data.length * 100));
                     percentSpan.textContent = `${progress}%`;
                     progressBar.style.width = `${progress}%`;
-                    
-                    // Small delay between chunks to let the server process
                     await new Promise(r => setTimeout(r, 100));
                 }
                 
-                updateStatus('Processing...', 'recording');
+                updateStatus('Processing...');
                 progressBar.style.width = '100%';
                 percentSpan.textContent = '100%';
                 
-                // Wait for processing to complete (no new messages for 5 seconds)
                 await new Promise(resolve => {
-                    const checkInterval = setInterval(() => {
-                        const timeSinceLastMessage = Date.now() - lastMessageTime;
-                        if (timeSinceLastMessage > 5000) {
-                            clearInterval(checkInterval);
+                    const check = setInterval(() => {
+                        if (Date.now() - lastMessageTime > 5000) {
+                            clearInterval(check);
                             resolve();
                         }
                     }, 500);
                 });
                 
                 ws.close();
+                updateStatus(`Complete • ${speakers.size} speakers`);
                 
-                updateStatus('Complete', 'connected');
-                
-                // Hide progress after a delay
                 setTimeout(() => {
                     progressDiv.classList.add('hidden');
-                    updateStatus('Disconnected', 'disconnected');
-                }, 3000);
+                }, 2000);
                 
             } catch (error) {
-                console.error('Error processing file:', error);
-                updateStatus('Error: ' + error.message, 'error');
+                console.error('Error:', error);
+                updateStatus('Error: ' + error.message);
                 progressDiv.classList.add('hidden');
             }
         }
     </script>
-    </body>
+</body>
 </html>
