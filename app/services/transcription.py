@@ -7,9 +7,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.config.settings import (
     MODEL_NAME, MODEL_PATH, LANGUAGE, PROCESSING_THREADS, COMPUTE_TYPE, DEVICE,
-    BEAM_SIZE, BEST_OF, VAD_MIN_SILENCE_MS, VAD_SPEECH_PAD_MS
+    BEAM_SIZE, BEST_OF, VAD_MIN_SILENCE_MS, VAD_SPEECH_PAD_MS,
+    VAD_METHOD, VAD_ONSET, VAD_OFFSET, VAD_CHUNK_SIZE, SAMPLE_RATE
 )
 from app.utils.logger import logger
+import soundfile as sf
+import librosa
+from app.services.vad import vad_split_segments
 
 # Global state
 whisper_model = None
@@ -67,6 +71,19 @@ def load_model():
         # exit(1)
 
 
+def load_audio_resampled(path: str, target_sr: int = SAMPLE_RATE) -> np.ndarray:
+    """
+    Load audio from disk and resample to target_sr.
+    """
+    audio, sr = sf.read(path, dtype="float32")
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
+    if sr != target_sr:
+        audio = np.array(audio, dtype=np.float32)
+        audio = np.ascontiguousarray(librosa.resample(audio, orig_sr=sr, target_sr=target_sr))
+    return audio
+
+
 def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 0.0):
     """
     Synchronous wrapper for faster-whisper transcription.
@@ -105,23 +122,49 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
             "min_silence_duration_ms": VAD_MIN_SILENCE_MS,
             "speech_pad_ms": VAD_SPEECH_PAD_MS,
         }
-        
-        segments, info = whisper_model.transcribe(
-            audio_normalized,
-            beam_size=BEAM_SIZE,  # Configurable beam size (default 5, higher = more accurate but slower)
-            best_of=BEST_OF,  # Configurable candidates (default 1, higher = more accurate but slower)
-            language=detected_language,  # None = auto-detect, otherwise use specified language
-            vad_filter=True,  # Always use faster-whisper's built-in VAD
-            vad_parameters=vad_params,
-            temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),  # Temperature fallback for accuracy
-            condition_on_previous_text=True,  # Use context from previous text for better articulation
-            no_speech_threshold=0.4,  # Balanced threshold to filter uncertain segments
-            log_prob_threshold=-0.7,  # Balanced threshold to reject uncertain predictions
-            compression_ratio_threshold=2.4,  # Detect repetitive/hallucinated text
-            suppress_blank=True,  # Suppress blank outputs
-            initial_prompt=None,  # Don't bias towards any specific phrases
-            word_timestamps=True,  # Enable word-level timestamps for better accuracy
-        )
+
+        if VAD_METHOD == "faster-whisper":
+            segments, info = whisper_model.transcribe(
+                audio_normalized,
+                beam_size=BEAM_SIZE,
+                best_of=BEST_OF,
+                language=detected_language,
+                vad_filter=True,
+                vad_parameters=vad_params,
+                temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                condition_on_previous_text=True,
+                no_speech_threshold=0.4,
+                log_prob_threshold=-0.7,
+                compression_ratio_threshold=2.4,
+                suppress_blank=True,
+                initial_prompt=None,
+                word_timestamps=True,
+            )
+        else:
+            # External VAD path: split audio into segments based on configured onset/offset
+            segments = []
+            speech_chunks = vad_split_segments(audio_normalized, VAD_METHOD, VAD_ONSET, VAD_OFFSET, VAD_CHUNK_SIZE)
+            for (s_start, s_end) in speech_chunks:
+                chunk_audio = audio_normalized[int(s_start * SAMPLE_RATE):int(s_end * SAMPLE_RATE)]
+                chunk_segments, info = whisper_model.transcribe(
+                    chunk_audio,
+                    beam_size=BEAM_SIZE,
+                    best_of=BEST_OF,
+                    language=detected_language,
+                    vad_filter=False,
+                    temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                    condition_on_previous_text=True,
+                    no_speech_threshold=0.4,
+                    log_prob_threshold=-0.7,
+                    compression_ratio_threshold=2.4,
+                    suppress_blank=True,
+                    initial_prompt=None,
+                    word_timestamps=True,
+                )
+                for seg in chunk_segments:
+                    seg.start += s_start
+                    seg.end += s_start
+                segments.extend(chunk_segments)
         
         # Log detected language for debugging
         if detected_language is None and hasattr(info, 'language'):
@@ -167,10 +210,22 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
                     logger.debug(f"Filtered repetitive segment (hallucination): '{text[:80]}...' (phrase '{first_phrase}' repeated {phrase_count} times)")
                     continue
             
+            words_payload = []
+            if hasattr(segment, "words") and segment.words:
+                for w in segment.words:
+                    if w.word.strip() == "":
+                        continue
+                    words_payload.append({
+                        "word": w.word,
+                        "start": (w.start or segment.start) + time_offset,
+                        "end": (w.end or segment.end) + time_offset
+                    })
+
             result.append({
                 "text": text,
                 "start": segment.start + time_offset,
-                "end": segment.end + time_offset
+                "end": segment.end + time_offset,
+                "words": words_payload
             })
         logger.debug(f"Transcription completed: language={info.language}, probability={info.language_probability:.2f}, segments={len(result)}")
         return result

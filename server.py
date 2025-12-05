@@ -11,6 +11,7 @@ from app.config.settings import USE_DIARIZATION, SERVER_HOST
 from app.utils.logger import logger
 from app.services.transcription import load_model, get_executor
 from app.services.speaker_identification import load_speaker_model
+from app.services.diarization import load_diarization_model
 from app.handlers.health_check import start_http_server
 from app.handlers.websocket_handler import websocket_handler
 
@@ -46,6 +47,12 @@ async def main():
             await loop.run_in_executor(executor, load_speaker_model)
         except Exception as e:
             logger.warning(f"Speaker model loading failed: {e}. Continuing without speaker identification.")
+
+        logger.info("Overlap diarization enabled - loading diarization pipeline...")
+        try:
+            await loop.run_in_executor(executor, load_diarization_model)
+        except Exception as e:
+            logger.warning(f"Diarization pipeline loading failed: {e}. Continuing without overlap diarization.")
     
     # Print summary after all models loaded
     print("", file=sys.stderr)

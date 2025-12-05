@@ -1,104 +1,79 @@
-# =============================================================================
-# WHISPER TRANSCRIPTION SERVER
-# =============================================================================
-# Models are pre-downloaded during docker build for faster startup.
-#
-# QUICK START (CPU - works on Mac/Linux/Windows):
-#   1. Build the image:
-#      docker-compose build
-#
-#   2. Start the server:
-#      docker-compose up -d
-#
-# WITH NVIDIA GPU (Linux only):
-#   docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-#
-# WITH SPEAKER IDENTIFICATION (requires HuggingFace token):
-#   1. Get a token from: https://huggingface.co/settings/tokens
-#   2. Accept model terms at:
-#      - https://huggingface.co/pyannote/embedding
-#   3. Build with token:
-#      HF_TOKEN=your_token docker-compose build
-#   4. Run with token:
-#      HF_TOKEN=your_token docker-compose up -d
-#
-# TO CHANGE THE WHISPER MODEL:
-#   MODEL_NAME=medium docker-compose build
-#   (Options: tiny, base, small, medium, large, large-v2, large-v3)
-#
-# FOR FASTER STARTUP ON MAC (use smaller model):
-#   MODEL_NAME=base docker-compose build
-#   docker-compose up -d
-# =============================================================================
-
 services:
   transcription-server:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        MODEL_NAME: ${MODEL_NAME:-large-v3}
-    # Uncomment for development - mount code without rebuilding:
-    # volumes:
-    #   - ./app:/app/app:ro
-    #   - ./server.py:/app/server.py:ro
-        HF_TOKEN: ${HF_TOKEN:-}
     container_name: transcription-server
     restart: unless-stopped
     
-    # Resource allocation for CPU
     deploy:
       resources:
         limits:
-          cpus: '8'
-          memory: 16G
+          cpus: '12'
+          memory: 24G
         reservations:
-          cpus: '4'
-          memory: 8G
+          cpus: '8'
+          memory: 20G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     
     ports:
       - "${HEALTH_CHECK_PORT:-8080}:8080"
       - "${WEBSOCKET_PORT:-8765}:8765"
     
     environment:
-      # Server Configuration
       - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
       - HEALTH_CHECK_PORT=${HEALTH_CHECK_PORT:-8080}
       - WEBSOCKET_PORT=${WEBSOCKET_PORT:-8765}
-      
-      # Device Configuration (CPU mode - auto-detect will use CPU on Mac)
-      - DEVICE=${DEVICE:-cpu}
-      - COMPUTE_TYPE=${COMPUTE_TYPE:-int8}  # int8 is fastest on CPU
-      
-      # Model Configuration
-      - MODEL_NAME=${MODEL_NAME:-large-v3}
-      - MODEL_PATH=/app/models
+      # Device configuration (GPU by default)
+      - DEVICE=cuda
+      - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
+      - PROCESSING_THREADS=${PROCESSING_THREADS:-12}
+      # Suppress cuDNN warnings
+      - CUDNN_LOGINFO_DBG=0
+      - CUDNN_LOGDEST_DBG=/dev/null
+      # Model configuration
+      - MODEL_NAME=${MODEL_NAME:-large}
+      - MODEL_PATH=${MODEL_PATH:-.}
       - LANGUAGE=${LANGUAGE:-}
-      - PROCESSING_THREADS=${PROCESSING_THREADS:-8}
-      
-      # VAD Configuration
+      # VAD configuration
+      - USE_VAD=${USE_VAD:-true}
+      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.3}
       - VAD_MIN_SILENCE_MS=${VAD_MIN_SILENCE_MS:-500}
       - VAD_SPEECH_PAD_MS=${VAD_SPEECH_PAD_MS:-200}
-      
-      # Transcription Performance
-      - BEAM_SIZE=${BEAM_SIZE:-5}
-      - BEST_OF=${BEST_OF:-1}
-      
-      # Speaker Identification
+      - VAD_MAX_SPEECH_MS=${VAD_MAX_SPEECH_MS:-5000}
+      # Speaker diarization
       - USE_DIARIZATION=${USE_DIARIZATION:-true}
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
-
-      # Speaker Identification Tuning
-      # Tuned for pyannote embedding model (produces lower similarities ~0.4-0.6)
-      - SPEAKER_SIMILARITY_THRESHOLD=${SPEAKER_SIMILARITY_THRESHOLD:-0.40}
-      - SPEAKER_ENROLLMENT_THRESHOLD=${SPEAKER_ENROLLMENT_THRESHOLD:-0.30}
-      - SPEAKER_MIN_SEGMENT_DURATION=${SPEAKER_MIN_SEGMENT_DURATION:-0.3}
-      - SPEAKER_CONFIRMATION_COUNT=${SPEAKER_CONFIRMATION_COUNT:-1}
-      - SPEAKER_VOICEPRINT_MEMORY=${SPEAKER_VOICEPRINT_MEMORY:-20}
-      - SPEAKER_LEARNING_RATE=${SPEAKER_LEARNING_RATE:-0.15}
-
-      # Audio Processing
+      
+      - ALLOW_UNSAFE_TORCH_LOAD=0
+      - USE_DIARIZATION=true
+      - USE_ALIGNMENT=true
+      # Speaker ID tuning (strict for quality)
+      - SPEAKER_SIMILARITY_THRESHOLD=0.55
+      - SPEAKER_ENROLLMENT_THRESHOLD=0.60
+      - SPEAKER_ENROLLMENT_FLOOR=0.40
+      - SPEAKER_CONFIRMATION_COUNT=4
+      - SPEAKER_MIN_SEGMENT_DURATION=1.0
+      - SPEAKER_LEARNING_RATE=0.20
+      - SPEAKER_MIN_ENERGY=0.0015
+      # VAD tuning (external pyannote for quality)
+      - VAD_METHOD=pyannote
+      - VAD_MIN_SILENCE_MS=400
+      - VAD_SPEECH_PAD_MS=300
+      - VAD_ONSET=0.5
+      - VAD_OFFSET=0.36
+      - VAD_CHUNK_SIZE=30
+      # Alignment model (optional; uses defaults if unset)
+      - USE_ALIGNMENT=true
+      # Speaker enrollment
+      - ENROLLMENT_SIMILARITY_THRESHOLD=${ENROLLMENT_SIMILARITY_THRESHOLD:-0.75}
+      - ENROLLMENT_MIN_SEGMENT_DURATION=${ENROLLMENT_MIN_SEGMENT_DURATION:-0.4}
+      - ENROLLMENT_LEARNING_RATE=${ENROLLMENT_LEARNING_RATE:-0.25}
+      - ENROLLMENT_MIN_CONFIDENCE=${ENROLLMENT_MIN_CONFIDENCE:-0.65}
+      - ENROLLMENT_ADAPTIVE_THRESHOLD=${ENROLLMENT_ADAPTIVE_THRESHOLD:-true}
+      # Audio processing
       - MAX_SEGMENT_SECONDS=${MAX_SEGMENT_SECONDS:-3600.0}
     
     shm_size: '2gb'
@@ -113,7 +88,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s  # CPU takes longer to load large-v3 model
+      start_period: 60s  # GPU loads models faster
     
     logging:
       driver: "json-file"

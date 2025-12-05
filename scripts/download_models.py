@@ -18,6 +18,7 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 MODEL_NAME = os.getenv("MODEL_NAME", "large-v3")
 MODEL_PATH = os.getenv("MODEL_PATH", "/app/models")
 HF_TOKEN = os.getenv("HF_TOKEN", None)
+DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 
 
 def download_whisper_model():
@@ -84,6 +85,36 @@ def download_speaker_embedding_model():
         print("   ⚠️  No HF_TOKEN provided - speaker embedding model requires authentication")
         print("   ⚠️  Set HF_TOKEN build arg to download speaker embedding model")
         print("   ⚠️  Speaker identification will be disabled at runtime")
+        return False
+
+
+def download_diarization_model():
+    """Download and cache the pyannote diarization pipeline."""
+    print("=" * 80)
+    print(f"📥 Downloading diarization model: {DIARIZATION_MODEL}")
+    print("=" * 80)
+
+    if not HF_TOKEN:
+        print("   ⚠️  No HF_TOKEN provided - diarization model may require authentication")
+        print("   ⚠️  Set HF_TOKEN build arg to download diarization model")
+        return False
+
+    os.environ['HF_TOKEN'] = HF_TOKEN
+    os.environ['HUGGING_FACE_HUB_TOKEN'] = HF_TOKEN
+
+    try:
+        from pyannote.audio import Pipeline
+
+        load_kwargs = {"use_auth_token": HF_TOKEN} if HF_TOKEN else {}
+        pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, **load_kwargs)
+        if pipeline is not None:
+            print("✅ Diarization model downloaded and verified")
+            del pipeline
+            return True
+        print("⚠️  Diarization pipeline loaded as None - may need to re-download at runtime")
+        return False
+    except Exception as e:
+        print(f"⚠️  Failed to download diarization model: {e}")
         return False
     
     os.environ['HF_TOKEN'] = HF_TOKEN
@@ -160,6 +191,15 @@ def main():
     except Exception as e:
         print(f"⚠️  Failed to download speaker embedding model: {e}")
         print("   Speaker identification will be disabled at runtime")
+
+    # Download diarization model (optional - requires HF token)
+    try:
+        diar_success = download_diarization_model()
+        if not diar_success:
+            print("\n   ℹ️  Overlap diarization will be disabled without the diarization model")
+    except Exception as e:
+        print(f"⚠️  Failed to download diarization model: {e}")
+        print("   Overlap diarization will be disabled at runtime")
     
     print("\n" + "=" * 80)
     print("✅ MODEL PRE-DOWNLOAD COMPLETE")

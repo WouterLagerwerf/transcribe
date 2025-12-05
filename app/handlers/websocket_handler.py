@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Any
 import numpy as np
 import websockets
+import torch
 
 # Use orjson for faster JSON serialization (3-10x faster than stdlib json)
 try:
@@ -21,12 +22,18 @@ except ImportError:
         return json.dumps(obj)
 
 from app.config.settings import (
-    SAMPLE_RATE, CHUNK_SIZE_SECONDS, MAX_SEGMENT_SECONDS, USE_DIARIZATION
+    SAMPLE_RATE, CHUNK_SIZE_SECONDS, MAX_SEGMENT_SECONDS, USE_DIARIZATION,
+    USE_ALIGNMENT, ALIGN_MODEL_NAME, LANGUAGE, TORCH_DEVICE
 )
 from app.utils.logger import logger
 from app.services.transcription import transcribe_synchronous, get_executor, is_server_ready
 from app.services.speaker_identification import (
     SpeakerIdentifier, is_model_loaded as is_speaker_model_loaded
+)
+from app.services.alignment import align_segments
+from app.services.diarization import (
+    diarize_audio,
+    is_diarization_model_loaded
 )
 
 # Pre-calculated constants
@@ -144,6 +151,198 @@ async def identify_speaker_for_segment(
         return None
 
 
+async def map_diarization_to_session_speakers(
+    diar_segments: list,
+    audio_float32: np.ndarray,
+    session: Session,
+    executor,
+    loop
+) -> list:
+    """Map diarization regions to session speaker labels using embeddings."""
+    if not diar_segments:
+        logger.info(f"{session.log_prefix} No diarization regions to map")
+        return []
+    if session.speaker_identifier is None or not is_speaker_model_loaded():
+        return []
+
+    mapped = []
+    for region in diar_segments:
+        seg_start = max(0, int(region["start"] * SAMPLE_RATE))
+        seg_end = min(len(audio_float32), int(region["end"] * SAMPLE_RATE))
+        if seg_end <= seg_start:
+            continue
+
+        segment_audio = audio_float32[seg_start:seg_end]
+        try:
+            speaker_label, confidence = await loop.run_in_executor(
+                executor,
+                session.speaker_identifier.identify_speaker,
+                segment_audio
+            )
+        except Exception as e:
+            logger.error(f"{session.log_prefix} Diarization mapping failed: {e}", exc_info=True)
+            continue
+
+        if not speaker_label and session.speaker_identifier:
+            speaker_label = session.speaker_identifier.get_last_speaker_label()
+
+        if speaker_label:
+            mapped.append({
+                "start": region["start"],
+                "end": region["end"],
+                "speaker": speaker_label,
+                "score": confidence
+            })
+    logger.info(
+        f"{session.log_prefix} Diarization mapped {len(mapped)}/{len(diar_segments)} regions to session speakers"
+    )
+    return mapped
+
+
+async def run_transcribe_and_diarize(
+    audio_float32: np.ndarray,
+    session: Session,
+    time_offset: float,
+    executor,
+    loop
+) -> Dict[str, Any]:
+    """
+    Run transcription and diarization in parallel for an audio chunk.
+
+    Returns a dict with:
+      {
+        "segments": [...],  # transcription segments
+        "diarization": [...],  # diarization regions with session speaker labels
+      }
+    """
+    diar_task = None
+    if session.speaker_identifier and is_diarization_model_loaded():
+        diar_task = loop.run_in_executor(executor, diarize_audio, audio_float32)
+
+    trans_task = loop.run_in_executor(
+        executor, transcribe_synchronous, audio_float32, time_offset
+    )
+
+    diar_regions = []
+    if diar_task:
+        diar_regions = await diar_task
+
+    segments = await trans_task
+
+    # Optional alignment (post-ASR) if enabled
+    try:
+        if USE_ALIGNMENT:
+            align_lang = LANGUAGE if LANGUAGE else None
+            segments = await loop.run_in_executor(
+                executor,
+                align_segments,
+                segments,
+                audio_float32,
+                align_lang,
+                TORCH_DEVICE,
+                ALIGN_MODEL_NAME,
+                None  # cache_dir
+            )
+    except Exception as align_err:
+        logger.warning(f"{session.log_prefix} Alignment skipped due to error: {align_err}")
+
+    # Map diarization regions to session speakers
+    diar_mapped = []
+    if diar_regions and session.speaker_identifier and is_speaker_model_loaded():
+        diar_mapped = await map_diarization_to_session_speakers(
+            diar_regions,
+            audio_float32,
+            session,
+            executor,
+            loop
+        )
+
+    # Apply absolute time offset
+    for region in diar_mapped:
+        region["start"] += time_offset
+        region["end"] += time_offset
+
+    logger.info(
+        f"{session.log_prefix} Chunk processed: segments={len(segments)}, "
+        f"diar_regions_raw={len(diar_regions)}, diar_regions_mapped={len(diar_mapped)}, "
+        f"duration={len(audio_float32)/SAMPLE_RATE:.2f}s"
+    )
+
+    return {
+        "segments": segments,
+        "diarization": diar_mapped
+    }
+
+
+def _pick_best_speaker_for_span(
+    span_start: float,
+    span_end: float,
+    diar_segments: list
+) -> str:
+    """Return speaker label with the largest overlap for a time span."""
+    best_label = None
+    best_overlap = 0.0
+    for region in diar_segments:
+        overlap = min(span_end, region["end"]) - max(span_start, region["start"])
+        if overlap > best_overlap and overlap > 0:
+            best_overlap = overlap
+            best_label = region.get("speaker")
+    return best_label
+
+
+def _slice_segment_with_diarization(segment: Dict, diar_segments: list) -> list:
+    """
+    Slice a transcript segment using diarization regions, returning
+    per-speaker sub-segments. Falls back to dominant speaker if no words.
+    """
+    if not diar_segments:
+        return [segment]
+
+    words = segment.get("words") or []
+    if not words:
+        # No word alignment; use dominant diarization speaker over the segment
+        dominant = _pick_best_speaker_for_span(segment["start"], segment["end"], diar_segments)
+        if dominant:
+            segment = {**segment, "speaker": dominant}
+        return [segment]
+
+    sub_segments = []
+    current_words = []
+    current_speaker = None
+
+    for word in words:
+        w_start = float(word.get("start", segment["start"]))
+        w_end = float(word.get("end", segment["end"]))
+        speaker = _pick_best_speaker_for_span(w_start, w_end, diar_segments)
+
+        if current_speaker is None:
+            current_speaker = speaker
+
+        if speaker != current_speaker and current_words:
+            text = "".join([w["word"] for w in current_words]).strip()
+            sub_segments.append({
+                "text": text,
+                "start": float(current_words[0]["start"]),
+                "end": float(current_words[-1]["end"]),
+                "speaker": current_speaker
+            })
+            current_words = []
+
+        current_speaker = speaker
+        current_words.append(word)
+
+    if current_words:
+        text = "".join([w["word"] for w in current_words]).strip()
+        sub_segments.append({
+            "text": text,
+            "start": float(current_words[0]["start"]),
+            "end": float(current_words[-1]["end"]),
+            "speaker": current_speaker
+        })
+
+    return sub_segments
+
+
 async def process_transcription(session: Session):
     """
     Process audio chunks and transcribe them with speaker identification.
@@ -168,40 +367,44 @@ async def process_transcription(session: Session):
                 buffer_len = len(session.audio_buffer)
                 if buffer_len > SAMPLE_RATE * 0.5:  # At least 500ms
                     audio_float32 = session.audio_buffer.get_all().astype(np.float32) / 32768.0
-                    
-                    # Transcribe
-                    segments = await loop.run_in_executor(
-                        executor, transcribe_synchronous, audio_float32, session.absolute_time_offset
+                    results = await run_transcribe_and_diarize(
+                        audio_float32,
+                        session,
+                        session.absolute_time_offset,
+                        executor,
+                        loop
                     )
-                    
-                    # Identify speaker for each segment
+
+                    diar_regions = results["diarization"]
+                    segments = results["segments"]
+
                     for segment in segments:
-                        if segment["text"]:
-                            # Extract segment audio for speaker ID
-                            seg_start = int((segment["start"] - session.absolute_time_offset) * SAMPLE_RATE)
-                            seg_end = int((segment["end"] - session.absolute_time_offset) * SAMPLE_RATE)
-                            seg_start = max(0, seg_start)
-                            seg_end = min(len(audio_float32), seg_end)
-                            segment_duration = (seg_end - seg_start) / SAMPLE_RATE
-                            
-                            if seg_end > seg_start and segment_duration >= 0.3:
-                                segment_audio = audio_float32[seg_start:seg_end]
-                                speaker = await identify_speaker_for_segment(
-                                    segment_audio, session, executor, loop
-                                )
-                                if speaker:
-                                    segment["speaker"] = speaker
-                                elif session.speaker_identifier:
-                                    last_speaker = session.speaker_identifier.get_last_speaker_label()
-                                    if last_speaker:
-                                        segment["speaker"] = last_speaker
-                            elif session.speaker_identifier:
+                        if not segment.get("text"):
+                            continue
+
+                        sub_segments = _slice_segment_with_diarization(segment, diar_regions)
+
+                        # Fallback to embedding-based ID if diarization did not assign
+                        for sub in sub_segments:
+                            if not sub.get("speaker") and session.speaker_identifier:
+                                seg_start = int((sub["start"] - session.absolute_time_offset) * SAMPLE_RATE)
+                                seg_end = int((sub["end"] - session.absolute_time_offset) * SAMPLE_RATE)
+                                seg_start = max(0, seg_start)
+                                seg_end = min(len(audio_float32), seg_end)
+                                if seg_end > seg_start:
+                                    segment_audio = audio_float32[seg_start:seg_end]
+                                    speaker = await identify_speaker_for_segment(
+                                        segment_audio, session, executor, loop
+                                    )
+                                    if speaker:
+                                        sub["speaker"] = speaker
+                            if not sub.get("speaker") and session.speaker_identifier:
                                 last_speaker = session.speaker_identifier.get_last_speaker_label()
                                 if last_speaker:
-                                    segment["speaker"] = last_speaker
-                            
+                                    sub["speaker"] = last_speaker
+
                             session.segments_processed += 1
-                            await send_transcript(session, segment, is_final=True)
+                            await send_transcript(session, sub, is_final=True)
                 break
 
             # Add chunk to buffer
@@ -214,47 +417,53 @@ async def process_transcription(session: Session):
                 session.audio_buffer.clear()
                 audio_float32 = segment_to_transcribe.astype(np.float32) / 32768.0
 
-                # Transcribe
-                segments = await loop.run_in_executor(
-                    executor, transcribe_synchronous, audio_float32, session.absolute_time_offset
+                results = await run_transcribe_and_diarize(
+                    audio_float32,
+                    session,
+                    session.absolute_time_offset,
+                    executor,
+                    loop
                 )
 
-                # Identify speaker for each segment
+                diar_regions = results["diarization"]
+                segments = results["segments"]
+
                 for segment in segments:
-                    if segment["text"]:
-                        # Extract segment audio for speaker ID
-                        seg_start = int((segment["start"] - session.absolute_time_offset) * SAMPLE_RATE)
-                        seg_end = int((segment["end"] - session.absolute_time_offset) * SAMPLE_RATE)
-                        seg_start = max(0, seg_start)
-                        seg_end = min(len(audio_float32), seg_end)
-                        
-                        segment_duration = (seg_end - seg_start) / SAMPLE_RATE
-                        logger.debug(f"{session.log_prefix} Speaker ID: seg_start={seg_start}, seg_end={seg_end}, duration={segment_duration:.2f}s, chunk_len={len(audio_float32)}")
-                        
-                        if seg_end > seg_start and segment_duration >= 0.3:
-                            segment_audio = audio_float32[seg_start:seg_end]
-                            speaker = await identify_speaker_for_segment(
-                                segment_audio, session, executor, loop
-                            )
-                            if speaker:
-                                segment["speaker"] = speaker
+                    if not segment.get("text"):
+                        continue
+
+                    sub_segments = _slice_segment_with_diarization(segment, diar_regions)
+
+                    for sub in sub_segments:
+                        if not sub.get("speaker") and session.speaker_identifier:
+                            seg_start = int((sub["start"] - session.absolute_time_offset) * SAMPLE_RATE)
+                            seg_end = int((sub["end"] - session.absolute_time_offset) * SAMPLE_RATE)
+                            seg_start = max(0, seg_start)
+                            seg_end = min(len(audio_float32), seg_end)
+                            segment_duration = (seg_end - seg_start) / SAMPLE_RATE
+                            logger.debug(f"{session.log_prefix} Speaker ID: seg_start={seg_start}, seg_end={seg_end}, duration={segment_duration:.2f}s, chunk_len={len(audio_float32)}")
+
+                            if seg_end > seg_start and segment_duration >= 0.3:
+                                segment_audio = audio_float32[seg_start:seg_end]
+                                speaker = await identify_speaker_for_segment(
+                                    segment_audio, session, executor, loop
+                                )
+                                if speaker:
+                                    sub["speaker"] = speaker
+                                elif session.speaker_identifier:
+                                    last_speaker = session.speaker_identifier.get_last_speaker_label()
+                                    if last_speaker:
+                                        sub["speaker"] = last_speaker
+                                        logger.debug(f"{session.log_prefix} Using last speaker {last_speaker} as fallback")
                             else:
-                                # Fallback to last speaker for continuity
                                 if session.speaker_identifier:
                                     last_speaker = session.speaker_identifier.get_last_speaker_label()
                                     if last_speaker:
-                                        segment["speaker"] = last_speaker
-                                        logger.debug(f"{session.log_prefix} Using last speaker {last_speaker} as fallback")
-                        else:
-                            # Very short segment - use last speaker
-                            if session.speaker_identifier:
-                                last_speaker = session.speaker_identifier.get_last_speaker_label()
-                                if last_speaker:
-                                    segment["speaker"] = last_speaker
-                                    logger.debug(f"{session.log_prefix} Short segment, using last speaker: {last_speaker}")
-                        
+                                        sub["speaker"] = last_speaker
+                                        logger.debug(f"{session.log_prefix} Short segment, using last speaker: {last_speaker}")
+
                         session.segments_processed += 1
-                        await send_transcript(session, segment, is_final=True)
+                        await send_transcript(session, sub, is_final=True)
                 
                 session.absolute_time_offset += segment_duration_seconds
 
@@ -376,3 +585,12 @@ def get_active_sessions() -> Dict[str, Session]:
 def get_session_count() -> int:
     """Returns the number of active sessions."""
     return len(active_sessions)
+
+
+def diag_summary(segments, diar_regions_raw, diar_regions_mapped, audio_len):
+    return {
+        "segments": len(segments),
+        "diar_regions_raw": len(diar_regions_raw),
+        "diar_regions_mapped": len(diar_regions_mapped),
+        "duration_seconds": audio_len
+    }

@@ -4,6 +4,12 @@ import os
 import torch
 import sys
 
+# VAD selection (pyannote or silero)
+VAD_METHOD = os.getenv("VAD_METHOD", "pyannote")
+VAD_ONSET = float(os.getenv("VAD_ONSET", "0.50"))
+VAD_OFFSET = float(os.getenv("VAD_OFFSET", "0.36"))
+VAD_CHUNK_SIZE = int(os.getenv("VAD_CHUNK_SIZE", "30"))
+
 # Server Configuration
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", 8080))
@@ -80,6 +86,13 @@ BEST_OF = int(os.getenv("BEST_OF", "1"))  # Number of candidates to consider (hi
 # When enabled, uses pyannote embedding model to identify speakers from their voice
 USE_DIARIZATION = os.getenv("USE_DIARIZATION", "true").lower() == "true"
 HF_TOKEN = os.getenv("HF_TOKEN", None)  # HuggingFace token for private models (required for speaker ID)
+
+# Diarization model (overlap-capable)
+DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+
+# Alignment configuration
+USE_ALIGNMENT = os.getenv("USE_ALIGNMENT", "false").lower() == "true"
+ALIGN_MODEL_NAME = os.getenv("ALIGN_MODEL", None)
 
 # Note: Speaker identification tuning parameters (SPEAKER_*) are loaded directly in speaker_identification.py
 # This avoids circular imports and keeps configuration close to the code that uses it

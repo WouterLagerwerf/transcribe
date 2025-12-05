@@ -17,6 +17,7 @@ Key features:
 import os
 import warnings
 import logging
+import contextlib
 
 # Suppress PyTorch Lightning warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -28,7 +29,7 @@ logging.getLogger("lightning_fabric").setLevel(logging.ERROR)
 
 import numpy as np
 import torch
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict
 from dataclasses import dataclass, field
 from app.utils.logger import logger
@@ -36,12 +37,15 @@ from app.config.settings import TORCH_DEVICE, SAMPLE_RATE
 
 # Configuration defaults (can be overridden via environment)
 # NOTE: pyannote embedding model produces relatively low cosine similarities (0.4-0.6 for same speaker)
-MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.3"))  # Minimum seconds for reliable embedding
+MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.8"))  # Minimum seconds for reliable embedding
 SIMILARITY_THRESHOLD = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.40"))  # Cosine similarity threshold (tuned for pyannote)
 ENROLLMENT_THRESHOLD = float(os.getenv("SPEAKER_ENROLLMENT_THRESHOLD", "0.30"))  # Below this = new speaker
+ENROLLMENT_FLOOR = float(os.getenv("SPEAKER_ENROLLMENT_FLOOR", "0.35"))  # Do not enroll below this similarity
 CONFIRMATION_COUNT = int(os.getenv("SPEAKER_CONFIRMATION_COUNT", "1"))  # Matches needed before confirming speaker
 VOICEPRINT_MEMORY = int(os.getenv("SPEAKER_VOICEPRINT_MEMORY", "20"))  # Number of embeddings to remember per speaker
 LEARNING_RATE = float(os.getenv("SPEAKER_LEARNING_RATE", "0.15"))  # How fast voiceprints adapt
+MIN_EMBED_ENERGY = float(os.getenv("SPEAKER_MIN_ENERGY", "0.001"))  # Minimum average abs energy to accept embedding
+ALLOW_UNSAFE_TORCH_LOAD = os.getenv("ALLOW_UNSAFE_TORCH_LOAD", "0")
 
 # Global state
 embedding_model = None
@@ -58,40 +62,147 @@ def load_speaker_model():
     try:
         from pyannote.audio import Model
         from app.config.settings import HF_TOKEN
-        
-        logger.info("Loading speaker embedding model...")
-        
+
+        logger.info("Loading speaker embedding model (safe weights-only load)...")
+
+        # Allowlist required Lightning callbacks for safe torch.load under PyTorch 2.6
+        safe_globals: List[type] = []
+
+        # EarlyStopping
+        early_stopping_cls = None
+        try:
+            from pytorch_lightning.callbacks.early_stopping import EarlyStopping as early_stopping_cls
+        except Exception as pl_err:
+            try:
+                from lightning.pytorch.callbacks.early_stopping import EarlyStopping as early_stopping_cls
+            except Exception as lp_err:
+                logger.warning(f"Could not import EarlyStopping for safe torch.load: pl_err={pl_err} lp_err={lp_err}")
+        if early_stopping_cls:
+            safe_globals.append(early_stopping_cls)
+
+        # ModelCheckpoint
+        model_checkpoint_cls = None
+        try:
+            from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint as model_checkpoint_cls
+        except Exception as pl_mc_err:
+            try:
+                from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint as model_checkpoint_cls
+            except Exception as lp_mc_err:
+                logger.warning(f"Could not import ModelCheckpoint for safe torch.load: pl_mc_err={pl_mc_err} lp_mc_err={lp_mc_err}")
+        if model_checkpoint_cls:
+            safe_globals.append(model_checkpoint_cls)
+
+        # OmegaConf configs (present in pyannote checkpoint)
+        list_config_cls = None
+        dict_config_cls = None
+        container_metadata_cls = None
+        metadata_cls = None
+        try:
+            from omegaconf.listconfig import ListConfig as list_config_cls
+        except Exception as lc_err:
+            logger.warning(f"Could not import ListConfig for safe torch.load: {lc_err}")
+        try:
+            from omegaconf.dictconfig import DictConfig as dict_config_cls
+        except Exception as dc_err:
+            logger.warning(f"Could not import DictConfig for safe torch.load: {dc_err}")
+        try:
+            from omegaconf.base import ContainerMetadata as container_metadata_cls
+        except Exception as cm_err:
+            logger.warning(f"Could not import ContainerMetadata for safe torch.load: {cm_err}")
+        try:
+            from omegaconf.base import Metadata as metadata_cls
+        except Exception as md_err:
+            logger.warning(f"Could not import Metadata for safe torch.load: {md_err}")
+        # Builtins and typing globals sometimes appear in checkpoints
+        builtins_list_cls = list
+        from collections import defaultdict as collections_defaultdict
+        if list_config_cls:
+            safe_globals.append(list_config_cls)
+        if dict_config_cls:
+            safe_globals.append(dict_config_cls)
+        if container_metadata_cls:
+            safe_globals.append(container_metadata_cls)
+        if metadata_cls:
+            safe_globals.append(metadata_cls)
+        if builtins_list_cls:
+            safe_globals.append(builtins_list_cls)
+        if collections_defaultdict:
+            safe_globals.append(collections_defaultdict)
+        # typing.Any appears in the checkpoint metadata
+        try:
+            safe_globals.append(Any)
+        except Exception as any_err:
+            logger.warning(f"Could not add typing.Any to safe globals: {any_err}")
+        if not list_config_cls and not dict_config_cls and not container_metadata_cls:
+            logger.error("omegaconf is required to load pyannote/embedding safely. Install with `pip install \"omegaconf>=2.3,<3\"` and restart. Speaker ID remains disabled.")
+            embedding_model_loaded = False
+            return False
+
+        if safe_globals:
+            try:
+                torch.serialization.add_safe_globals(safe_globals)
+                logger.info(f"Allowlisted torch.load safe globals: {[cls.__name__ for cls in safe_globals]}")
+            except Exception as sg_err:
+                logger.warning(f"Failed to add safe globals for torch.load: {sg_err}")
+
         # Set token for huggingface_hub
         if HF_TOKEN:
-            os.environ['HF_TOKEN'] = HF_TOKEN
-            os.environ['HUGGING_FACE_HUB_TOKEN'] = HF_TOKEN
-        
-        # Load the model directly (not through Inference wrapper)
+            os.environ["HF_TOKEN"] = HF_TOKEN
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+
+        def _load_model(use_unsafe_weights: bool = False):
+            """Load the embedding model, optionally forcing weights_only=False."""
+            original_torch_load = torch.load
+
+            @contextlib.contextmanager
+            def _unsafe_torch_load():
+                def _patched(*args, **kwargs):
+                    kwargs["weights_only"] = False
+                    return original_torch_load(*args, **kwargs)
+
+                torch.load = _patched
+                try:
+                    yield
+                finally:
+                    torch.load = original_torch_load
+
+            load_ctx = _unsafe_torch_load() if use_unsafe_weights else contextlib.nullcontext()
+            with load_ctx:
+                try:
+                    return Model.from_pretrained("pyannote/embedding", use_auth_token=HF_TOKEN)
+                except TypeError:
+                    return Model.from_pretrained("pyannote/embedding")
+
         try:
-            embedding_model = Model.from_pretrained(
-                "pyannote/embedding",
-                use_auth_token=HF_TOKEN
-            )
-        except TypeError:
-            embedding_model = Model.from_pretrained("pyannote/embedding")
-        
+            embedding_model_local = _load_model(use_unsafe_weights=False)
+            load_mode = "safe"
+        except Exception as safe_err:
+            logger.error(f"Safe load failed (weights_only=True): {safe_err}", exc_info=True)
+            logger.warning("Retrying speaker embedding load with weights_only=False (unsafe). Only enable if you trust the checkpoint source.")
+            embedding_model_local = _load_model(use_unsafe_weights=True)
+            load_mode = "unsafe_weights_only_false"
+
         # Move to device and set to eval mode
-        embedding_model = embedding_model.to(torch.device(TORCH_DEVICE))
-        embedding_model.eval()
+        embedding_model_local = embedding_model_local.to(torch.device(TORCH_DEVICE))
+        embedding_model_local.eval()
+        embedding_model = embedding_model_local
         embedding_model_loaded = True
-        
+
         import sys
         print("", file=sys.stderr)
         print("=" * 80, file=sys.stderr)
         print("🎤 SPEAKER EMBEDDING MODEL LOADED", file=sys.stderr)
         print(f"   Similarity Threshold: {SIMILARITY_THRESHOLD}", file=sys.stderr)
         print(f"   Min Segment Duration: {MIN_SEGMENT_DURATION}s", file=sys.stderr)
+        print(f"   Load Mode: {load_mode}", file=sys.stderr)
         print("=" * 80, file=sys.stderr)
         print("", file=sys.stderr)
-        
-        logger.info("✅ Speaker embedding model loaded successfully")
+
+        logger.info(f"✅ Speaker embedding model loaded successfully (mode={load_mode})")
+        if load_mode == "unsafe_weights_only_false":
+            logger.warning("Model loaded with weights_only=False; ensure checkpoint source is trusted.")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to load speaker embedding model: {e}", exc_info=True)
         logger.warning("Speaker identification will be disabled")
@@ -126,8 +237,8 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
     
     # Check if audio has valid content (not silent)
     audio_energy = np.abs(audio_float32).mean()
-    if audio_energy < 0.0001:  # Lowered threshold - allow quieter audio
-        logger.debug(f"Audio too quiet for embedding: energy={audio_energy:.6f}")
+    if audio_energy < MIN_EMBED_ENERGY:
+        logger.debug(f"Audio too quiet for embedding: energy={audio_energy:.6f} < {MIN_EMBED_ENERGY}")
         return None
     
     try:
@@ -263,7 +374,14 @@ class SpeakerIdentifier:
         self.last_speaker_id: Optional[int] = None
         self.segments_since_last_id: int = 0
         
-        logger.info(f"SpeakerIdentifier initialized: threshold={similarity_threshold}, confirm={confirmation_count}")
+        logger.info(
+            f"SpeakerIdentifier initialized: "
+            f"similarity_threshold={similarity_threshold}, "
+            f"enrollment_threshold={enrollment_threshold}, "
+            f"confirmation_count={confirmation_count}, "
+            f"min_segment_duration={MIN_SEGMENT_DURATION}, "
+            f"learning_rate={LEARNING_RATE}"
+        )
     
     def identify_speaker(self, audio_float32: np.ndarray) -> Tuple[Optional[str], float]:
         """
@@ -349,8 +467,13 @@ class SpeakerIdentifier:
             return (best_match.label, best_similarity)
         
         elif best_similarity < self.enrollment_threshold:
-            # Low similarity to all speakers - likely a new speaker
-            new_speaker = self._enroll_new_speaker(embedding)
+            # Low similarity to all speakers - likely a new speaker, but only if above floor
+            if best_similarity < ENROLLMENT_FLOOR:
+                logger.info(f"Similarity {best_similarity:.3f} below enrollment floor {ENROLLMENT_FLOOR:.2f}; skipping enrollment")
+                self.segments_since_last_id += 1
+                return (None, best_similarity)
+
+            new_speaker = self._enroll_new_speaker(embedding, best_similarity)
             if new_speaker:
                 self.last_speaker_id = new_speaker.id
                 self.segments_since_last_id = 0
@@ -391,7 +514,7 @@ class SpeakerIdentifier:
         logger.debug(f"Uncertain speaker: similarity={best_similarity:.3f}")
         return (None, best_similarity)
     
-    def _enroll_new_speaker(self, embedding: np.ndarray) -> Optional[Speaker]:
+    def _enroll_new_speaker(self, embedding: np.ndarray, similarity: Optional[float] = None) -> Optional[Speaker]:
         """Create a new pending speaker."""
         # Check if we already have too many speakers
         total_speakers = len(self.speakers) + len(self.pending_speakers)
@@ -417,7 +540,14 @@ class SpeakerIdentifier:
         )
         
         self.pending_speakers[speaker_id] = speaker
-        logger.info(f"🎤 New speaker detected: {speaker.label} (pending confirmation)")
+        if similarity is not None:
+            logger.info(
+                f"🎤 New speaker detected: {speaker.label} (pending confirmation) "
+                f"(similarity={similarity:.3f} vs thresholds "
+                f"match={self.similarity_threshold}, enroll<{self.enrollment_threshold})"
+            )
+        else:
+            logger.info(f"🎤 New speaker detected: {speaker.label} (pending confirmation)")
         
         return speaker
     

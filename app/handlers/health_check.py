@@ -1,11 +1,13 @@
 """HTTP API server for health checks and transcription."""
 
+import os
 from aiohttp import web
 
 from app.config.settings import SERVER_HOST, HEALTH_CHECK_PORT, USE_DIARIZATION
 from app.utils.logger import logger
 from app.services.transcription import is_server_ready, get_model_name
 from app.services.speaker_identification import is_model_loaded as is_speaker_model_loaded
+from app.services.diarization import is_diarization_model_loaded
 from app.handlers.transcription_api import transcribe_handler
 from app.handlers.websocket_handler import get_session_count
 
@@ -18,6 +20,8 @@ async def health_check_handler(request):
             "model": get_model_name(),
             "speaker_identification_enabled": USE_DIARIZATION,
             "speaker_identification_loaded": is_speaker_model_loaded() if USE_DIARIZATION else False,
+            "overlap_diarization_loaded": is_diarization_model_loaded() if USE_DIARIZATION else False,
+            "alignment_enabled": os.getenv("USE_ALIGNMENT", "false").lower() == "true",
             "active_sessions": get_session_count()
         }
         return web.json_response(response_data)

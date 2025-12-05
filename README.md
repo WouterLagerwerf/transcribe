@@ -6,6 +6,7 @@ A high-performance, GPU-accelerated speech-to-text server with real-time speaker
 
 - **Real-time streaming transcription** via WebSocket
 - **Speaker identification** - automatically detect and label different speakers
+- **Overlap-aware diarization** - detect and track multiple simultaneous speakers
 - **Multi-tenant support** - handle multiple concurrent transcription sessions
 - **GPU acceleration** - optimized for NVIDIA GPUs with CUDA
 - **Pre-downloaded models** - fast container startup
@@ -120,6 +121,7 @@ Expected response:
   "model": "large-v3",
   "speaker_identification_enabled": true,
   "speaker_identification_loaded": true,
+  "overlap_diarization_loaded": true,
   "active_sessions": 0
 }
 ```
@@ -345,6 +347,15 @@ curl -X POST http://localhost:8080/transcribe \
    └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
+6b. OVERLAP DIARIZATION
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  Pyannote diarization pipeline                                          │
+   │  - Detect overlapping speaker regions                                   │
+   │  - Map regions to session speakers via embeddings                       │
+   │  - Slice transcript words into per-speaker spans                        │
+   └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
 7. OUTPUT
    ┌─────────────────────────────────────────────────────────────────────────┐
    │  JSON Response via WebSocket                                            │
@@ -430,6 +441,7 @@ PENDING                          CONFIRMED
 | `SPEAKER_MIN_SEGMENT_DURATION` | 0.5s | Minimum audio for embedding |
 | `SPEAKER_VOICEPRINT_MEMORY` | 20 | Embeddings to remember |
 | `SPEAKER_LEARNING_RATE` | 0.15 | Voiceprint adaptation speed |
+| `DIARIZATION_MODEL` | pyannote/speaker-diarization-3.1 | Overlap-aware diarization pipeline |
 
 ---
 
