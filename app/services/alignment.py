@@ -42,6 +42,7 @@ class AlignMetadata:
     language: str
     dictionary: Dict[str, int]
     type: str  # "torchaudio" or "huggingface"
+    sample_rate: int
 
 
 def load_align_model(language_code: str, device: torch.device, model_name: Optional[str] = None, cache_dir: Optional[str] = None):
@@ -62,6 +63,7 @@ def load_align_model(language_code: str, device: torch.device, model_name: Optio
         align_model = bundle.get_model(dl_kwargs={"model_dir": cache_dir}).to(device)
         labels = bundle.get_labels()
         align_dictionary = {c.lower(): i for i, c in enumerate(labels)}
+        sample_rate = bundle.sample_rate
     else:
         processor = Wav2Vec2Processor.from_pretrained(model_name, cache_dir=cache_dir)
         align_model = Wav2Vec2ForCTC.from_pretrained(model_name, cache_dir=cache_dir)
@@ -69,8 +71,9 @@ def load_align_model(language_code: str, device: torch.device, model_name: Optio
         align_model = align_model.to(device)
         labels = processor.tokenizer.get_vocab()
         align_dictionary = {char.lower(): code for char, code in processor.tokenizer.get_vocab().items()}
+        sample_rate = int(getattr(align_model.config, "sampling_rate", SAMPLE_RATE))
 
-    metadata = AlignMetadata(language=language_code, dictionary=align_dictionary, type=pipeline_type)
+    metadata = AlignMetadata(language=language_code, dictionary=align_dictionary, type=pipeline_type, sample_rate=sample_rate)
     return align_model, processor if pipeline_type == "huggingface" else None, metadata
 
 
@@ -160,12 +163,12 @@ def align_segments(
         seg_audio = waveform[:, f1:f2]
         with torch.no_grad():
             if metadata.type == "torchaudio":
-                emissions, _ = align_model(seg_audio, align_model.sample_rate)
+                emissions, _ = align_model(seg_audio, metadata.sample_rate)
                 emissions = emissions[0].cpu()
                 logits = emissions
                 dictionary = metadata.dictionary
             else:
-                inputs = processor(seg_audio.squeeze(0), sampling_rate=align_model.config.sampling_rate, return_tensors="pt")
+                inputs = processor(seg_audio.squeeze(0), sampling_rate=metadata.sample_rate, return_tensors="pt")
                 logits = align_model(inputs.input_values.to(device)).logits.squeeze(0).cpu()
                 dictionary = metadata.dictionary
 

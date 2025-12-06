@@ -216,6 +216,7 @@
         let durationInterval = null;
         let speakers = new Map(); // speaker -> {color, messageCount}
         let lastSpeaker = null;
+        let lastMessageMeta = null; // { speaker, textEl, timeEl, startSeconds }
         
         const speakerColors = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3', 'speaker-4', 'speaker-5', 'speaker-6', 'speaker-7'];
         const bubbleColors = ['bubble-speaker-0', 'bubble-speaker-1', 'bubble-speaker-2', 'bubble-speaker-3', 'bubble-speaker-4', 'bubble-speaker-5', 'bubble-speaker-6', 'bubble-speaker-7'];
@@ -281,70 +282,83 @@
             });
             
             // Determine if this is a new speaker (show avatar) or continuation
-            const isNewSpeaker = lastSpeaker !== speaker;
+            const isNewSpeaker = !lastMessageMeta || lastSpeaker !== speaker;
             lastSpeaker = speaker;
             
             // Alternate sides based on speaker index (even = left, odd = right)
             const isRight = speakerIdx % 2 === 0;
+            let textEl, timeEl;
             
-            const wrapper = document.createElement('div');
-            wrapper.className = `message-enter flex ${isRight ? 'justify-end' : 'justify-start'} ${isNewSpeaker ? 'mt-4' : 'mt-0.5'}`;
-            
-            const messageGroup = document.createElement('div');
-            messageGroup.className = `flex items-end gap-2 max-w-[85%] ${isRight ? 'flex-row-reverse' : ''}`;
-            
-            // Avatar (only for new speaker)
-            if (isNewSpeaker) {
+            if (isNewSpeaker || !lastMessageMeta) {
+                const wrapper = document.createElement('div');
+                wrapper.className = `message-enter flex ${isRight ? 'justify-end' : 'justify-start'} ${isNewSpeaker ? 'mt-4' : 'mt-0.5'}`;
+                
+                const messageGroup = document.createElement('div');
+                messageGroup.className = `flex items-end gap-2 max-w-[85%] ${isRight ? 'flex-row-reverse' : ''}`;
+                
+                // Avatar (only for new speaker)
                 const avatar = document.createElement('div');
                 avatar.className = `w-8 h-8 rounded-full ${colorClass} flex items-center justify-center text-white text-xs font-semibold flex-shrink-0`;
                 avatar.textContent = `S${speakerIdx >= 0 ? speakerIdx : '?'}`;
                 messageGroup.appendChild(avatar);
-            } else {
-                const spacer = document.createElement('div');
-                spacer.className = 'w-8 flex-shrink-0';
-                messageGroup.appendChild(spacer);
-            }
-            
-            // Bubble
-            const bubble = document.createElement('div');
-            bubble.className = `relative px-3 py-2 rounded-lg ${bubbleColor} ${isNewSpeaker ? (isRight ? 'rounded-tr-none' : 'rounded-tl-none') : ''}`;
-            
-            // Add tail for new speaker messages
-            if (isNewSpeaker) {
+                
+                // Bubble
+                const bubble = document.createElement('div');
+                bubble.className = `relative px-3 py-2 rounded-lg ${bubbleColor} ${(isRight ? 'rounded-tr-none' : 'rounded-tl-none')}`;
+                
+                // Add tail
                 const tail = document.createElement('div');
                 tail.className = `absolute top-0 ${isRight ? '-right-2' : '-left-2'} w-0 h-0`;
                 tail.style.cssText = isRight 
                     ? `border-left: 8px solid; border-left-color: inherit; border-top: 8px solid transparent;`
                     : `border-right: 8px solid; border-right-color: inherit; border-top: 8px solid transparent;`;
                 bubble.appendChild(tail);
-            }
-            
-            // Speaker name (for new speaker)
-            if (isNewSpeaker) {
+                
+                // Speaker name
                 const nameEl = document.createElement('div');
                 nameEl.className = 'text-xs font-medium text-whatsapp-teal mb-1';
                 nameEl.textContent = speaker;
                 bubble.appendChild(nameEl);
+                
+                // Message text
+                textEl = document.createElement('p');
+                textEl.className = 'text-sm text-whatsapp-text leading-relaxed';
+                textEl.textContent = data.transcript;
+                bubble.appendChild(textEl);
+                
+                // Timestamp
+                timeEl = document.createElement('div');
+                timeEl.className = 'flex items-center justify-end gap-1 mt-1';
+                timeEl.innerHTML = `
+                    <span class="text-[10px] text-whatsapp-textSecondary">${data.start?.toFixed(1) || '0'}s</span>
+                    <span class="text-[10px] text-whatsapp-textSecondary">${timestamp}</span>
+                `;
+                bubble.appendChild(timeEl);
+                
+                messageGroup.appendChild(bubble);
+                wrapper.appendChild(messageGroup);
+                container.appendChild(wrapper);
+                
+                lastMessageMeta = {
+                    speaker,
+                    textEl,
+                    timeEl,
+                    startSeconds: data.start ?? 0,
+                };
+            } else {
+                // Same speaker: append text to last bubble
+                textEl = lastMessageMeta.textEl;
+                timeEl = lastMessageMeta.timeEl;
+                const existing = textEl.textContent || '';
+                textEl.textContent = existing ? `${existing} ${data.transcript}` : data.transcript;
+                
+                // Keep earliest start, keep wall-clock timestamp unchanged
+                lastMessageMeta.startSeconds = Math.min(lastMessageMeta.startSeconds, data.start ?? lastMessageMeta.startSeconds);
+                timeEl.innerHTML = `
+                    <span class="text-[10px] text-whatsapp-textSecondary">${lastMessageMeta.startSeconds.toFixed(1)}s</span>
+                    <span class="text-[10px] text-whatsapp-textSecondary">${timestamp}</span>
+                `;
             }
-            
-            // Message text
-            const textEl = document.createElement('p');
-            textEl.className = 'text-sm text-whatsapp-text leading-relaxed';
-            textEl.textContent = data.transcript;
-            bubble.appendChild(textEl);
-            
-            // Timestamp
-            const timeEl = document.createElement('div');
-            timeEl.className = 'flex items-center justify-end gap-1 mt-1';
-            timeEl.innerHTML = `
-                <span class="text-[10px] text-whatsapp-textSecondary">${data.start?.toFixed(1) || '0'}s</span>
-                <span class="text-[10px] text-whatsapp-textSecondary">${timestamp}</span>
-            `;
-            bubble.appendChild(timeEl);
-            
-            messageGroup.appendChild(bubble);
-            wrapper.appendChild(messageGroup);
-            container.appendChild(wrapper);
             
             // Scroll to bottom
             document.getElementById('chat-container').scrollTop = document.getElementById('chat-container').scrollHeight;
@@ -425,6 +439,7 @@
                 startTime = Date.now();
                 speakers.clear();
                 lastSpeaker = null;
+                lastMessageMeta = null;
                 
                 document.getElementById('mic-icon').classList.add('hidden');
                 document.getElementById('waveform').classList.remove('hidden');
@@ -447,6 +462,7 @@
             if (audioContext) { audioContext.close(); audioContext = null; }
             if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
             
+            lastMessageMeta = null;
             document.getElementById('mic-icon').classList.remove('hidden');
             document.getElementById('waveform').classList.add('hidden');
             document.getElementById('record-btn').classList.remove('bg-red-500', 'hover:bg-red-600');
@@ -506,6 +522,7 @@
                 let lastMessageTime = Date.now();
                 speakers.clear();
                 lastSpeaker = null;
+                lastMessageMeta = null;
                 
                 ws.onmessage = async (event) => {
                     lastMessageTime = Date.now();

@@ -37,7 +37,8 @@ from app.config.settings import TORCH_DEVICE, SAMPLE_RATE
 
 # Configuration defaults (can be overridden via environment)
 # NOTE: pyannote embedding model produces relatively low cosine similarities (0.4-0.6 for same speaker)
-MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.8"))  # Minimum seconds for reliable embedding
+MIN_SEGMENT_DURATION = float(os.getenv("SPEAKER_MIN_SEGMENT_DURATION", "0.3"))  # Minimum seconds for reliable embedding
+MIN_SEGMENT_PAD_SECONDS = float(os.getenv("SPEAKER_MIN_SEGMENT_PAD_SECONDS", "0.3"))  # If shorter than MIN_SEGMENT_DURATION but above half, pad to this length
 SIMILARITY_THRESHOLD = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.40"))  # Cosine similarity threshold (tuned for pyannote)
 ENROLLMENT_THRESHOLD = float(os.getenv("SPEAKER_ENROLLMENT_THRESHOLD", "0.30"))  # Below this = new speaker
 ENROLLMENT_FLOOR = float(os.getenv("SPEAKER_ENROLLMENT_FLOOR", "0.35"))  # Do not enroll below this similarity
@@ -229,11 +230,18 @@ def extract_embedding(audio_float32: np.ndarray) -> Optional[np.ndarray]:
         logger.warning("Speaker embedding model not loaded")
         return None
     
-    # Check minimum duration
+    # Check minimum duration and optionally pad short segments
     duration = len(audio_float32) / SAMPLE_RATE
     if duration < MIN_SEGMENT_DURATION:
-        logger.debug(f"Audio too short for embedding: {duration:.2f}s < {MIN_SEGMENT_DURATION}s")
-        return None
+        if duration >= MIN_SEGMENT_DURATION * 0.5:
+            target_len = int(max(MIN_SEGMENT_DURATION, MIN_SEGMENT_PAD_SECONDS) * SAMPLE_RATE)
+            pad_len = target_len - len(audio_float32)
+            audio_float32 = np.pad(audio_float32, (0, pad_len), mode="constant")
+            duration = len(audio_float32) / SAMPLE_RATE
+            logger.debug(f"Padded short audio for embedding: new_duration={duration:.2f}s (was {duration - pad_len/SAMPLE_RATE:.2f}s)")
+        else:
+            logger.debug(f"Audio too short for embedding: {duration:.2f}s < {MIN_SEGMENT_DURATION}s")
+            return None
     
     # Check if audio has valid content (not silent)
     audio_energy = np.abs(audio_float32).mean()

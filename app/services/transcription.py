@@ -123,48 +123,53 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
             "speech_pad_ms": VAD_SPEECH_PAD_MS,
         }
 
-        if VAD_METHOD == "faster-whisper":
-            segments, info = whisper_model.transcribe(
-                audio_normalized,
+        def _decode(audio_arr, use_vad_filter: bool):
+            return whisper_model.transcribe(
+                audio_arr,
                 beam_size=BEAM_SIZE,
                 best_of=BEST_OF,
                 language=detected_language,
-                vad_filter=True,
-                vad_parameters=vad_params,
+                vad_filter=use_vad_filter,
+                vad_parameters=vad_params if use_vad_filter else None,
                 temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
                 condition_on_previous_text=True,
                 no_speech_threshold=0.4,
-                log_prob_threshold=-0.7,
+                log_prob_threshold=-1.0,
                 compression_ratio_threshold=2.4,
                 suppress_blank=True,
                 initial_prompt=None,
                 word_timestamps=True,
             )
+
+        if VAD_METHOD == "faster-whisper":
+            segments_iter, info = _decode(audio_normalized, use_vad_filter=True)
+            segments = list(segments_iter)
         else:
             # External VAD path: split audio into segments based on configured onset/offset
             segments = []
             speech_chunks = vad_split_segments(audio_normalized, VAD_METHOD, VAD_ONSET, VAD_OFFSET, VAD_CHUNK_SIZE)
+            total_span = sum(se - ss for ss, se in speech_chunks)
+            logger.info(
+                f"External VAD ({VAD_METHOD}) spans={len(speech_chunks)}, "
+                f"total_span={total_span:.2f}s, energy={audio_max:.4f}"
+            )
             for (s_start, s_end) in speech_chunks:
                 chunk_audio = audio_normalized[int(s_start * SAMPLE_RATE):int(s_end * SAMPLE_RATE)]
-                chunk_segments, info = whisper_model.transcribe(
-                    chunk_audio,
-                    beam_size=BEAM_SIZE,
-                    best_of=BEST_OF,
-                    language=detected_language,
-                    vad_filter=False,
-                    temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-                    condition_on_previous_text=True,
-                    no_speech_threshold=0.4,
-                    log_prob_threshold=-0.7,
-                    compression_ratio_threshold=2.4,
-                    suppress_blank=True,
-                    initial_prompt=None,
-                    word_timestamps=True,
-                )
+                chunk_segments_iter, info = _decode(chunk_audio, use_vad_filter=False)
+                chunk_segments = list(chunk_segments_iter)
                 for seg in chunk_segments:
                     seg.start += s_start
                     seg.end += s_start
                 segments.extend(chunk_segments)
+
+            # Fallback: if no segments found but audio has energy, retry with built-in VAD
+            if not segments and audio_max > 1e-5:
+                logger.warning(
+                    f"External VAD produced no segments; retrying with faster-whisper VAD for this window. "
+                    f"energy={audio_max:.4f}, spans={len(speech_chunks)}, total_span={total_span:.2f}s"
+                )
+                segments_iter, info = _decode(audio_normalized, use_vad_filter=True)
+                segments = list(segments_iter)
         
         # Log detected language for debugging
         if detected_language is None and hasattr(info, 'language'):
@@ -172,23 +177,27 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
         # Extract segments with timestamps
         # Filter out very short segments and low-confidence segments that are likely noise
         result = []
+        filtered_short = filtered_low_conf = filtered_repeat = filtered_empty = 0
         for segment in segments:
             text = segment.text.strip()
             
             # Skip empty segments
             if not text:
+                filtered_empty += 1
                 continue
             
             # Skip very short segments (< 0.25 seconds) that are likely noise or uncertain predictions
             segment_duration = segment.end - segment.start
             if segment_duration < 0.25:
                 logger.debug(f"Filtered short segment (likely noise/uncertain): '{text}' ({segment_duration:.2f}s)")
+                filtered_short += 1
                 continue
             
             # Skip segments with low average log probability (likely noise/hallucination/uncertain predictions)
             # Balanced threshold to reject uncertain/weird outputs while allowing legitimate speech
             if hasattr(segment, 'avg_logprob') and segment.avg_logprob < -1.0:
                 logger.debug(f"Filtered low-confidence segment (uncertain/weird): '{text}' (logprob: {segment.avg_logprob:.2f})")
+                filtered_low_conf += 1
                 continue
             
             # Filter out repetitive/hallucinated text (e.g., "I'm sorry" repeated many times)
@@ -208,6 +217,7 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
                 # If the same 2-word phrase appears 3+ times consecutively, it's likely a hallucination
                 if phrase_count >= 3:
                     logger.debug(f"Filtered repetitive segment (hallucination): '{text[:80]}...' (phrase '{first_phrase}' repeated {phrase_count} times)")
+                    filtered_repeat += 1
                     continue
             
             words_payload = []
@@ -227,7 +237,13 @@ def transcribe_synchronous(audio_data_float32: np.ndarray, time_offset: float = 
                 "end": segment.end + time_offset,
                 "words": words_payload
             })
-        logger.debug(f"Transcription completed: language={info.language}, probability={info.language_probability:.2f}, segments={len(result)}")
+        logger.info(
+            f"Transcription completed: lang={getattr(info, 'language', 'n/a')} "
+            f"p={getattr(info, 'language_probability', 0.0):.2f} "
+            f"kept={len(result)} raw={len(segments)} "
+            f"filtered_short={filtered_short} filtered_low_conf={filtered_low_conf} "
+            f"filtered_repeat={filtered_repeat} filtered_empty={filtered_empty}"
+        )
         return result
     except Exception as e:
         logger.error(f"Error during transcription: {e}", exc_info=True)

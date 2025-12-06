@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 import numpy as np
 import websockets
 import torch
@@ -22,8 +22,21 @@ except ImportError:
         return json.dumps(obj)
 
 from app.config.settings import (
-    SAMPLE_RATE, CHUNK_SIZE_SECONDS, MAX_SEGMENT_SECONDS, USE_DIARIZATION,
-    USE_ALIGNMENT, ALIGN_MODEL_NAME, LANGUAGE, TORCH_DEVICE
+    SAMPLE_RATE,
+    STREAM_WINDOW_SECONDS,
+    STREAM_HOP_SECONDS,
+    STREAM_FINAL_LAG_SECONDS,
+    STREAM_PARTIAL_DEBOUNCE_MS,
+    STREAM_ENABLE_PARTIALS,
+    MAX_SEGMENT_SECONDS,
+    USE_DIARIZATION,
+    USE_ALIGNMENT,
+    ALIGN_MODEL_NAME,
+    LANGUAGE,
+    TORCH_DEVICE,
+    DIAR_ROLLING_SECONDS,
+    DIAR_HOP_SECONDS,
+    AUDIO_QUEUE_MAXSIZE,
 )
 from app.utils.logger import logger
 from app.services.transcription import transcribe_synchronous, get_executor, is_server_ready
@@ -52,15 +65,22 @@ class AudioBuffer:
         self._total_samples: int = 0
         self._max_samples: int = max_samples
     
-    def append(self, audio_chunk: np.ndarray) -> None:
-        """Append audio chunk to buffer."""
+    def append(self, audio_chunk: np.ndarray) -> int:
+        """
+        Append audio chunk to buffer.
+        Returns number of samples trimmed from the front (for time tracking).
+        """
         self._chunks.append(audio_chunk)
         self._total_samples += len(audio_chunk)
         
+        removed_samples = 0
         # Trim old chunks if we exceed max size
         while self._total_samples > self._max_samples and self._chunks:
             removed = self._chunks.popleft()
+            removed_samples += len(removed)
             self._total_samples -= len(removed)
+        
+        return removed_samples
     
     def get_all(self) -> np.ndarray:
         """Get all audio samples."""
@@ -89,10 +109,19 @@ class Session:
     """
     session_id: str
     websocket: Any
-    audio_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    audio_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=AUDIO_QUEUE_MAXSIZE))
     audio_buffer: AudioBuffer = field(default_factory=AudioBuffer)
+    diar_buffer: AudioBuffer = field(default_factory=lambda: AudioBuffer(max_samples=int(DIAR_ROLLING_SECONDS * SAMPLE_RATE)))
     speaker_identifier: Optional[SpeakerIdentifier] = None
-    absolute_time_offset: float = 0.0
+    buffer_start_time: float = 0.0  # absolute time of the first sample in audio_buffer
+    diar_buffer_start_time: float = 0.0  # absolute time of the first sample in diar_buffer
+    next_window_start: float = 0.0
+    last_partial_sent_at: float = 0.0
+    last_diar_run: float = 0.0
+    diarization_cache: List[Dict[str, Any]] = field(default_factory=list)
+    pending_segments: List[Dict[str, Any]] = field(default_factory=list)
+    last_known_speaker: Optional[str] = None
+    absolute_time_offset: float = 0.0  # kept for stats compatibility
     segments_processed: int = 0
     
     @property
@@ -204,7 +233,8 @@ async def run_transcribe_and_diarize(
     session: Session,
     time_offset: float,
     executor,
-    loop
+    loop,
+    diarization_override: Optional[list] = None
 ) -> Dict[str, Any]:
     """
     Run transcription and diarization in parallel for an audio chunk.
@@ -215,15 +245,16 @@ async def run_transcribe_and_diarize(
         "diarization": [...],  # diarization regions with session speaker labels
       }
     """
+    diar_regions = diarization_override or []
+
     diar_task = None
-    if session.speaker_identifier and is_diarization_model_loaded():
+    if diarization_override is None and session.speaker_identifier and is_diarization_model_loaded():
         diar_task = loop.run_in_executor(executor, diarize_audio, audio_float32)
 
     trans_task = loop.run_in_executor(
         executor, transcribe_synchronous, audio_float32, time_offset
     )
 
-    diar_regions = []
     if diar_task:
         diar_regions = await diar_task
 
@@ -247,8 +278,8 @@ async def run_transcribe_and_diarize(
         logger.warning(f"{session.log_prefix} Alignment skipped due to error: {align_err}")
 
     # Map diarization regions to session speakers
-    diar_mapped = []
-    if diar_regions and session.speaker_identifier and is_speaker_model_loaded():
+    diar_mapped = diar_regions
+    if diarization_override is None and diar_regions and session.speaker_identifier and is_speaker_model_loaded():
         diar_mapped = await map_diarization_to_session_speakers(
             diar_regions,
             audio_float32,
@@ -343,130 +374,295 @@ def _slice_segment_with_diarization(segment: Dict, diar_segments: list) -> list:
     return sub_segments
 
 
+def _int16_to_float32(audio_int16: np.ndarray) -> np.ndarray:
+    if len(audio_int16) == 0:
+        return np.array([], dtype=np.float32)
+    return audio_int16.astype(np.float32) / 32768.0
+
+
+async def _emit_pending_segments(
+    session: Session,
+    stable_time: float,
+    allow_partial: bool,
+    partial_debounce: float,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """
+    Emit partial updates (throttled) and finalize segments once they are older
+    than stable_time. Pending list is kept small by pruning finalized entries.
+    """
+    now = loop.time()
+    can_send_partial = allow_partial and (now - session.last_partial_sent_at) >= partial_debounce
+
+    keep: List[Dict[str, Any]] = []
+    for entry in session.pending_segments:
+        segment = entry["segment"]
+        if not entry.get("sent_partial") and can_send_partial:
+            await send_transcript(session, segment, is_final=False)
+            entry["sent_partial"] = True
+            session.last_partial_sent_at = now
+
+        if not entry.get("sent_final") and segment["end"] <= stable_time:
+            await send_transcript(session, segment, is_final=True)
+            session.segments_processed += 1
+            entry["sent_final"] = True
+
+        if not entry.get("sent_final"):
+            keep.append(entry)
+
+    session.pending_segments = keep
+
+
+async def _maybe_run_diarization(
+    session: Session,
+    executor,
+    loop: asyncio.AbstractEventLoop,
+    force: bool = False
+) -> None:
+    """Run diarization on the rolling buffer on a slower cadence to keep context."""
+    if not (session.speaker_identifier and is_diarization_model_loaded()):
+        return
+
+    diar_len_seconds = session.diar_buffer.duration_seconds
+    diar_buffer_end = session.diar_buffer_start_time + diar_len_seconds
+    if diar_len_seconds < 0.5:
+        return
+
+    if not force and (diar_buffer_end - session.last_diar_run) < DIAR_HOP_SECONDS:
+        return
+
+    diar_audio_int16 = session.diar_buffer.get_all()
+    if len(diar_audio_int16) == 0:
+        return
+
+    diar_audio_float32 = _int16_to_float32(diar_audio_int16)
+    diar_regions = await loop.run_in_executor(executor, diarize_audio, diar_audio_float32)
+
+    if diar_regions and session.speaker_identifier and is_speaker_model_loaded():
+        diar_regions = await map_diarization_to_session_speakers(
+            diar_regions,
+            diar_audio_float32,
+            session,
+            executor,
+            loop
+        )
+
+    # Offset to absolute timeline
+    for region in diar_regions:
+        region["start"] += session.diar_buffer_start_time
+        region["end"] += session.diar_buffer_start_time
+
+    session.diarization_cache = diar_regions
+    session.last_diar_run = diar_buffer_end
+
+
+async def _process_window(
+    session: Session,
+    window_audio_float32: np.ndarray,
+    window_start: float,
+    diar_regions: list,
+    executor,
+    loop: asyncio.AbstractEventLoop,
+    stable_time: float,
+    partial_debounce: float,
+    allow_partial: bool,
+) -> None:
+    """
+    Run ASR for a single streaming window and enqueue partial/final emissions.
+    """
+    if len(window_audio_float32) < int(0.25 * SAMPLE_RATE):
+        return
+
+    results = await run_transcribe_and_diarize(
+        window_audio_float32,
+        session,
+        window_start,
+        executor,
+        loop,
+        diarization_override=diar_regions
+    )
+
+    diar_for_window = diar_regions or results.get("diarization", [])
+    segments = results.get("segments", [])
+    logger.info(
+        f"{session.log_prefix} Window processed: start={window_start:.2f}s "
+        f"dur={len(window_audio_float32)/SAMPLE_RATE:.2f}s "
+        f"segments={len(segments)}, diar_regions={len(diar_for_window)}"
+    )
+
+    for segment in segments:
+        if not segment.get("text"):
+            continue
+
+        sub_segments = _slice_segment_with_diarization(segment, diar_for_window)
+
+        for sub in sub_segments:
+            if not sub.get("speaker") and session.speaker_identifier:
+                seg_start = int((sub["start"] - window_start) * SAMPLE_RATE)
+                seg_end = int((sub["end"] - window_start) * SAMPLE_RATE)
+                seg_start = max(0, seg_start)
+                seg_end = min(len(window_audio_float32), seg_end)
+                segment_duration = (seg_end - seg_start) / SAMPLE_RATE
+
+                if seg_end > seg_start and segment_duration >= 0.3:
+                    segment_audio = window_audio_float32[seg_start:seg_end]
+                    speaker = await identify_speaker_for_segment(
+                        segment_audio, session, executor, loop
+                    )
+                    if speaker:
+                        sub["speaker"] = speaker
+                        session.last_known_speaker = speaker
+                    elif session.speaker_identifier:
+                        last_speaker = session.speaker_identifier.get_last_speaker_label()
+                        if last_speaker:
+                            sub["speaker"] = last_speaker
+                            session.last_known_speaker = last_speaker
+
+            session.pending_segments.append({
+                "segment": sub,
+                "sent_partial": False,
+                "sent_final": False
+            })
+
+        # If speaker still missing but we have a recent known speaker, apply it
+        if session.last_known_speaker:
+            for entry in session.pending_segments:
+                seg = entry["segment"]
+                if not seg.get("speaker"):
+                    seg["speaker"] = session.last_known_speaker
+
+    await _emit_pending_segments(
+        session,
+        stable_time=stable_time,
+        allow_partial=allow_partial,
+        partial_debounce=partial_debounce,
+        loop=loop
+    )
+
+
+async def _process_remaining_buffer(
+    session: Session,
+    executor,
+    loop: asyncio.AbstractEventLoop,
+    partial_debounce: float,
+) -> None:
+    """
+    Flush whatever remains in the buffer when the client disconnects.
+    """
+    buffer_int16 = session.audio_buffer.get_all()
+    if len(buffer_int16) == 0:
+        return
+
+    buffer_float32 = _int16_to_float32(buffer_int16)
+    buffer_end_time = session.buffer_start_time + len(buffer_int16) / SAMPLE_RATE
+    session.absolute_time_offset = buffer_end_time
+
+    await _maybe_run_diarization(session, executor, loop, force=True)
+
+    start_time = max(session.next_window_start, session.buffer_start_time)
+    if buffer_end_time > start_time:
+        start_idx = int((start_time - session.buffer_start_time) * SAMPLE_RATE)
+        window_audio = buffer_float32[start_idx:]
+        await _process_window(
+            session,
+            window_audio,
+            start_time,
+            session.diarization_cache,
+            executor,
+            loop,
+            stable_time=buffer_end_time,
+            partial_debounce=partial_debounce,
+            allow_partial=False,
+        )
+
+    await _emit_pending_segments(
+        session,
+        stable_time=buffer_end_time,
+        allow_partial=False,
+        partial_debounce=partial_debounce,
+        loop=loop
+    )
+
+
 async def process_transcription(session: Session):
     """
     Process audio chunks and transcribe them with speaker identification.
     
-    Each session has its own:
-    - Audio buffer (no cross-talk between sessions)
-    - Speaker identifier (speakers are tracked per-session)
-    - Time offset (timestamps are relative to session start)
-    
-    Uses faster-whisper's built-in VAD for speech detection.
-    Uses speaker embeddings for consistent speaker identification.
+    Uses short overlapping windows for low-latency streaming while keeping
+    a rolling diarization buffer for better speaker segmentation.
     """
     executor = get_executor()
     loop = asyncio.get_running_loop()
+    window_size_samples = int(STREAM_WINDOW_SECONDS * SAMPLE_RATE)
+    hop_seconds = STREAM_HOP_SECONDS
+    partial_debounce = STREAM_PARTIAL_DEBOUNCE_MS / 1000.0
+    send_partials = STREAM_ENABLE_PARTIALS
 
     while True:
         try:
             audio_chunk = await session.audio_queue.get()
-            
+
             if audio_chunk is None:  # Sentinel value to stop
-                # Process any remaining audio
-                buffer_len = len(session.audio_buffer)
-                if buffer_len > SAMPLE_RATE * 0.5:  # At least 500ms
-                    audio_float32 = session.audio_buffer.get_all().astype(np.float32) / 32768.0
-                    results = await run_transcribe_and_diarize(
-                        audio_float32,
-                        session,
-                        session.absolute_time_offset,
-                        executor,
-                        loop
-                    )
-
-                    diar_regions = results["diarization"]
-                    segments = results["segments"]
-
-                    for segment in segments:
-                        if not segment.get("text"):
-                            continue
-
-                        sub_segments = _slice_segment_with_diarization(segment, diar_regions)
-
-                        # Fallback to embedding-based ID if diarization did not assign
-                        for sub in sub_segments:
-                            if not sub.get("speaker") and session.speaker_identifier:
-                                seg_start = int((sub["start"] - session.absolute_time_offset) * SAMPLE_RATE)
-                                seg_end = int((sub["end"] - session.absolute_time_offset) * SAMPLE_RATE)
-                                seg_start = max(0, seg_start)
-                                seg_end = min(len(audio_float32), seg_end)
-                                if seg_end > seg_start:
-                                    segment_audio = audio_float32[seg_start:seg_end]
-                                    speaker = await identify_speaker_for_segment(
-                                        segment_audio, session, executor, loop
-                                    )
-                                    if speaker:
-                                        sub["speaker"] = speaker
-                            if not sub.get("speaker") and session.speaker_identifier:
-                                last_speaker = session.speaker_identifier.get_last_speaker_label()
-                                if last_speaker:
-                                    sub["speaker"] = last_speaker
-
-                            session.segments_processed += 1
-                            await send_transcript(session, sub, is_final=True)
+                await _process_remaining_buffer(
+                    session,
+                    executor,
+                    loop,
+                    partial_debounce,
+                )
                 break
 
-            # Add chunk to buffer
-            session.audio_buffer.append(audio_chunk)
-            segment_duration_seconds = session.audio_buffer.duration_seconds
-            
-            # Transcribe when we have enough audio
-            if segment_duration_seconds >= CHUNK_SIZE_SECONDS:
-                segment_to_transcribe = session.audio_buffer.get_all()
-                session.audio_buffer.clear()
-                audio_float32 = segment_to_transcribe.astype(np.float32) / 32768.0
+            # Add chunk to rolling buffers and advance start times for trimmed samples
+            trimmed_main = session.audio_buffer.append(audio_chunk)
+            trimmed_diar = session.diar_buffer.append(audio_chunk)
+            if trimmed_main:
+                session.buffer_start_time += trimmed_main / SAMPLE_RATE
+            if trimmed_diar:
+                session.diar_buffer_start_time += trimmed_diar / SAMPLE_RATE
 
-                results = await run_transcribe_and_diarize(
-                    audio_float32,
+            buffer_int16 = session.audio_buffer.get_all()
+            if len(buffer_int16) == 0:
+                continue
+
+            buffer_float32 = _int16_to_float32(buffer_int16)
+            buffer_end_time = session.buffer_start_time + len(buffer_int16) / SAMPLE_RATE
+            session.absolute_time_offset = buffer_end_time
+
+            await _maybe_run_diarization(session, executor, loop)
+
+            if session.next_window_start < session.buffer_start_time:
+                session.next_window_start = session.buffer_start_time
+
+            while session.next_window_start + STREAM_WINDOW_SECONDS <= buffer_end_time:
+                start_idx = int((session.next_window_start - session.buffer_start_time) * SAMPLE_RATE)
+                end_idx = start_idx + window_size_samples
+                if end_idx > len(buffer_float32):
+                    break
+
+                window_audio = buffer_float32[start_idx:end_idx]
+                stable_time = max(session.buffer_start_time, buffer_end_time - STREAM_FINAL_LAG_SECONDS)
+
+                await _process_window(
                     session,
-                    session.absolute_time_offset,
+                    window_audio,
+                    session.next_window_start,
+                    session.diarization_cache,
                     executor,
-                    loop
+                    loop,
+                    stable_time=stable_time,
+                    partial_debounce=partial_debounce,
+                    allow_partial=send_partials,
                 )
 
-                diar_regions = results["diarization"]
-                segments = results["segments"]
+                session.next_window_start += hop_seconds
 
-                for segment in segments:
-                    if not segment.get("text"):
-                        continue
-
-                    sub_segments = _slice_segment_with_diarization(segment, diar_regions)
-
-                    for sub in sub_segments:
-                        if not sub.get("speaker") and session.speaker_identifier:
-                            seg_start = int((sub["start"] - session.absolute_time_offset) * SAMPLE_RATE)
-                            seg_end = int((sub["end"] - session.absolute_time_offset) * SAMPLE_RATE)
-                            seg_start = max(0, seg_start)
-                            seg_end = min(len(audio_float32), seg_end)
-                            segment_duration = (seg_end - seg_start) / SAMPLE_RATE
-                            logger.debug(f"{session.log_prefix} Speaker ID: seg_start={seg_start}, seg_end={seg_end}, duration={segment_duration:.2f}s, chunk_len={len(audio_float32)}")
-
-                            if seg_end > seg_start and segment_duration >= 0.3:
-                                segment_audio = audio_float32[seg_start:seg_end]
-                                speaker = await identify_speaker_for_segment(
-                                    segment_audio, session, executor, loop
-                                )
-                                if speaker:
-                                    sub["speaker"] = speaker
-                                elif session.speaker_identifier:
-                                    last_speaker = session.speaker_identifier.get_last_speaker_label()
-                                    if last_speaker:
-                                        sub["speaker"] = last_speaker
-                                        logger.debug(f"{session.log_prefix} Using last speaker {last_speaker} as fallback")
-                            else:
-                                if session.speaker_identifier:
-                                    last_speaker = session.speaker_identifier.get_last_speaker_label()
-                                    if last_speaker:
-                                        sub["speaker"] = last_speaker
-                                        logger.debug(f"{session.log_prefix} Short segment, using last speaker: {last_speaker}")
-
-                        session.segments_processed += 1
-                        await send_transcript(session, sub, is_final=True)
-                
-                session.absolute_time_offset += segment_duration_seconds
-
+            stable_time = max(session.buffer_start_time, buffer_end_time - STREAM_FINAL_LAG_SECONDS)
+            await _emit_pending_segments(
+                session,
+                stable_time=stable_time,
+                allow_partial=send_partials,
+                partial_debounce=partial_debounce,
+                loop=loop
+            )
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -481,7 +677,8 @@ async def send_transcript(session: Session, segment: Dict, is_final: bool = True
     end_time = float(segment["end"])
     
     speaker_info = f" [{segment.get('speaker', 'UNKNOWN')}]" if segment.get('speaker') else ""
-    logger.info(f"{session.log_prefix} Transcript: {segment['text']}{speaker_info} [{start_time:.2f}s - {end_time:.2f}s]")
+    tag = "final" if is_final else "partial"
+    logger.info(f"{session.log_prefix} Transcript({tag}): {segment['text']}{speaker_info} [{start_time:.2f}s - {end_time:.2f}s]")
     
     response_data = {
         "session_id": session.session_id,

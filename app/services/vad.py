@@ -40,6 +40,12 @@ def _vad_pyannote(audio_float32: np.ndarray, onset: float, offset: float) -> Lis
                 from omegaconf.nodes import AnyNode
                 from omegaconf.base import Metadata
                 torch.serialization.add_safe_globals([dict, int, AnyNode, Metadata])
+                # Allowlist pyannote Introspection for safe torch.load (torch >= 2.6)
+                try:
+                    from pyannote.audio.core.model import Introspection
+                    torch.serialization.add_safe_globals([Introspection])
+                except Exception:
+                    pass
             except Exception:
                 pass
             def _load_model(use_unsafe: bool = False):

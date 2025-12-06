@@ -61,8 +61,22 @@ PROCESSING_THREADS = int(os.getenv("PROCESSING_THREADS", 4))
 
 # Audio Processing Configuration
 SAMPLE_RATE = 16000
-CHUNK_SIZE_SECONDS = 3.0  # Duration of audio segment to process at once
+# Legacy chunking value (kept for backward compatibility); the streaming
+# pipeline uses STREAM_WINDOW_SECONDS/STREAM_HOP_SECONDS instead.
+CHUNK_SIZE_SECONDS = 3.0
 MAX_SEGMENT_SECONDS = float(os.getenv("MAX_SEGMENT_SECONDS", "3600.0"))  # Maximum segment size (60 minutes default)
+
+# Low-latency streaming controls
+STREAM_WINDOW_SECONDS = float(os.getenv("STREAM_WINDOW_SECONDS", "1.0"))  # size of ASR window
+STREAM_HOP_SECONDS = float(os.getenv("STREAM_HOP_SECONDS", "0.5"))        # hop between windows (overlap = window-hop)
+STREAM_FINAL_LAG_SECONDS = float(os.getenv("STREAM_FINAL_LAG_SECONDS", "0.5"))  # lookahead before marking final
+STREAM_PARTIAL_DEBOUNCE_MS = int(os.getenv("STREAM_PARTIAL_DEBOUNCE_MS", "350"))  # throttle partial emissions
+AUDIO_QUEUE_MAXSIZE = int(os.getenv("AUDIO_QUEUE_MAXSIZE", "12"))  # backpressure on websocket queue
+STREAM_ENABLE_PARTIALS = os.getenv("STREAM_ENABLE_PARTIALS", "true").lower() == "true"
+
+# Rolling diarization controls
+DIAR_ROLLING_SECONDS = float(os.getenv("DIAR_ROLLING_SECONDS", "6.0"))
+DIAR_HOP_SECONDS = float(os.getenv("DIAR_HOP_SECONDS", "2.5"))
 
 # VAD Configuration (Voice Activity Detection)
 # Uses faster-whisper's built-in VAD for speech detection
